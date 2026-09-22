@@ -37,3 +37,6 @@ _*.py
 _*.txt
 _*.log
 _shots/
+
+# 临时分析文件
+_bcg_analysis/
