@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 构建产物
+build/
+dist/
+*.spec.bak
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 临时调试文件
+_*.py
+_*.txt
+_*.log
+_shots/
