@@ -288,12 +288,13 @@ h2 {
 .cta-section .lead { margin: 20px auto 0; }
 .cta-section .hero-cta { justify-content: center; }
 .dl-note {
-  margin: 16px auto 0;
+  margin: 12px auto 0;
   font-size: 12px;
+  line-height: 1.7;
   color: #8fa3ad;
 }
-.dl-note span[hidden] { display: none; }
-.dl-note span {
+.dl-note + .dl-note { margin-top: 5px; }
+.dl-hash {
   font-family: Consolas, monospace;
   font-size: 11px;
   color: #cbd5e1;
