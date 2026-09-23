@@ -292,6 +292,7 @@
   <div class="hero-cta">
     <a href="https://install.zhigui.icu/diandian/Diandian-Setup-1.1.0.exe" class="btn-primary" data-download>立即下载</a>
   </div>
+  <p class="dl-note">浏览器若提示风险，请选择「保留」→「仍然运行」。<span id="dl-hash" hidden></span></p>
 </section>
 
 
@@ -366,6 +367,12 @@
       document.querySelectorAll("a[data-download]").forEach(function (link) {
         link.href = target.href;
       });
+      var hashView = document.getElementById("dl-hash");
+      if (hashView && manifest.sha256) {
+        hashView.textContent = "SHA-256：" + manifest.sha256.slice(0, 16) + "…" + manifest.sha256.slice(-16);
+        hashView.title = manifest.sha256;
+        hashView.hidden = false;
+      }
     })
     .catch(function () {});
 })();

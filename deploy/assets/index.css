@@ -287,6 +287,18 @@ h2 {
 }
 .cta-section .lead { margin: 20px auto 0; }
 .cta-section .hero-cta { justify-content: center; }
+.dl-note {
+  margin: 16px auto 0;
+  font-size: 12px;
+  color: #8fa3ad;
+}
+.dl-note span[hidden] { display: none; }
+.dl-note span {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  color: #cbd5e1;
+  word-break: break-all;
+}
 
 /* ===== FAQ（GEO/SEO 内容，样式集中在此便于统一调整） ===== */
 .faq-section {
