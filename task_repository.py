@@ -18,6 +18,8 @@ class TaskRepository:
         self.tasks_path = base_dir / "tasks.json"
         self.trash_path = base_dir / "trash.json"
         self.schedules_path = base_dir / "schedules.json"
+        self.ui_state_path = base_dir / "ui-state.json"
+        self.update_state_path = base_dir / "update-state.json"
         self.backup_dir = base_dir / "backups"
         self.template_dir = base_dir / "templates"
         for directory in (base_dir, self.backup_dir, self.template_dir):
@@ -78,6 +80,32 @@ class TaskRepository:
     def save_schedules(self, schedules: list[Schedule]) -> None:
         payload = {"schemaVersion": SCHEDULE_SCHEMA_VERSION, "schedules": [item.to_dict() for item in schedules]}
         self._atomic_write(self.schedules_path, payload, create_backup=False)
+
+    def load_ui_state(self) -> dict[str, Any]:
+        """读取窗口几何、主题等界面偏好；缺失或损坏时返回空表（全部走默认值）。"""
+        if not self.ui_state_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.ui_state_path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def save_ui_state(self, state: dict[str, Any]) -> None:
+        self._atomic_write(self.ui_state_path, state, create_backup=False)
+
+    def load_update_state(self) -> dict[str, Any]:
+        """读取自动更新状态（上次检查时间、已跳过的版本）；损坏时按从未检查处理。"""
+        if not self.update_state_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.update_state_path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def save_update_state(self, state: dict[str, Any]) -> None:
+        self._atomic_write(self.update_state_path, state, create_backup=False)
 
     def delete_template_if_unused(self, template_file: str, active: list[Task], trash: list[Task]) -> None:
         if not template_file:

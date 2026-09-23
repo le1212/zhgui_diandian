@@ -47,6 +47,7 @@ RDW_ERASE = 0x0004
 RDW_ALLCHILDREN = 0x0080
 RDW_FRAME = 0x0400
 RDW_UPDATENOW = 0x0100
+MONITOR_DEFAULTTONEAREST = 2
 
 
 class POINT(ctypes.Structure):
@@ -55,6 +56,10 @@ class POINT(ctypes.Structure):
 
 class RECT(ctypes.Structure):
     _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG), ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", RECT), ("rcWork", RECT), ("dwFlags", wintypes.DWORD)]
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -83,6 +88,13 @@ USER32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 USER32.GetWindowTextW.restype = ctypes.c_int
 USER32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
 USER32.GetWindowRect.restype = wintypes.BOOL
+USER32.MonitorFromPoint.argtypes = [POINT, wintypes.DWORD]
+USER32.MonitorFromPoint.restype = wintypes.HMONITOR
+USER32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(MONITORINFO)]
+USER32.GetMonitorInfoW.restype = wintypes.BOOL
+MONITORENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(RECT), wintypes.LPARAM)
+USER32.EnumDisplayMonitors.argtypes = [wintypes.HDC, ctypes.POINTER(RECT), MONITORENUMPROC, wintypes.LPARAM]
+USER32.EnumDisplayMonitors.restype = wintypes.BOOL
 USER32.IsWindow.argtypes = [wintypes.HWND]
 USER32.IsWindow.restype = wintypes.BOOL
 USER32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
@@ -133,24 +145,38 @@ USER32.SetForegroundWindow.argtypes = [wintypes.HWND]
 USER32.SetForegroundWindow.restype = wintypes.BOOL
 KERNEL32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
 KERNEL32.CreateMutexW.restype = wintypes.HANDLE
+KERNEL32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+KERNEL32.ReleaseMutex.restype = wintypes.BOOL
 KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
 KERNEL32.CloseHandle.restype = wintypes.BOOL
 SW_RESTORE = 9
 ERROR_ALREADY_EXISTS = 183
+_MUTEX_HANDLE: int | None = None
 
 
 def acquire_mutex(name: str) -> int | None:
     """获取命名互斥体；已有实例持有同名互斥体时返回 None。
 
-    返回的句柄须由调用方保持存活到进程退出，否则互斥体立即失效。
+    句柄记录在模块级，随进程存活到退出；主题切换重启前可用 release_mutex 提前释放。
     """
+    global _MUTEX_HANDLE
     handle = KERNEL32.CreateMutexW(None, False, name)
     if not handle:
         return None
     if KERNEL32.GetLastError() == ERROR_ALREADY_EXISTS:
         KERNEL32.CloseHandle(handle)
         return None
+    _MUTEX_HANDLE = handle
     return handle
+
+
+def release_mutex() -> None:
+    """显式释放并关闭单实例互斥体；未持有时是安全的空操作。"""
+    global _MUTEX_HANDLE
+    if _MUTEX_HANDLE:
+        KERNEL32.ReleaseMutex(_MUTEX_HANDLE)
+        KERNEL32.CloseHandle(_MUTEX_HANDLE)
+        _MUTEX_HANDLE = None
 
 
 def activate_window_by_title(title: str) -> bool:
@@ -241,6 +267,42 @@ def window_title(hwnd: int) -> str:
 def window_rect(hwnd: int) -> RECT | None:
     rect = RECT()
     return rect if USER32.GetWindowRect(hwnd, ctypes.byref(rect)) else None
+
+
+def monitor_workarea_at(x: int, y: int) -> tuple[int, int, int, int] | None:
+    """返回包含屏幕坐标 (x, y) 的显示器工作区 (x, y, 宽, 高)，失败返回 None。
+
+    多显示器下弹层必须按所在显示器的工作区裁剪，按主屏裁剪会造成菜单跳屏；
+    工作区已排除任务栏，也避免菜单底部被任务栏遮挡。
+    """
+    monitor = USER32.MonitorFromPoint(POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST)
+    if not monitor:
+        return None
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    if not USER32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return None
+    work = info.rcWork
+    return work.left, work.top, work.right - work.left, work.bottom - work.top
+
+
+def monitor_workareas() -> list[tuple[int, int, int, int]]:
+    """枚举所有显示器的工作区 (x, y, 宽, 高)，失败时退回主屏近似值。"""
+    areas: list[tuple[int, int, int, int]] = []
+
+    @MONITORENUMPROC
+    def _callback(_handle, _context, _monitor, _data) -> int:
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if USER32.GetMonitorInfoW(_handle, ctypes.byref(info)):
+            work = info.rcWork
+            areas.append((work.left, work.top, work.right - work.left, work.bottom - work.top))
+        return 1
+
+    if USER32.EnumDisplayMonitors(None, None, _callback, 0):
+        return areas
+    fallback = monitor_workarea_at(0, 0)
+    return [fallback] if fallback else []
 
 
 def click_at(x: int, y: int, button: str = "left") -> None:

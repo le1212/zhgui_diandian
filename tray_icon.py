@@ -27,12 +27,15 @@ NIM_DELETE = 2
 NIF_MESSAGE = 0x0001
 NIF_ICON = 0x0002
 NIF_TIP = 0x0004
+NIF_INFO = 0x0010
+NIIF_INFO = 0x0001
 IMAGE_ICON = 1
 LR_LOADFROMFILE = 0x0010
 TPM_RIGHTBUTTON = 0x0002
 TPM_RETURNCMD = 0x0100
 TPM_NONOTIFY = 0x0080
 MF_STRING = 0x0000
+MF_SEPARATOR = 0x0800
 SM_CXSMICON = 49
 SW_RESTORE = 9
 
@@ -116,13 +119,15 @@ class TrayIcon:
     """托盘图标句柄；回调签名均无参数，由调用方保证线程安全。"""
 
     MENU_SHOW = 1
-    MENU_EXIT = 2
+    MENU_CHECK_UPDATE = 2
+    MENU_EXIT = 3
 
-    def __init__(self, tooltip: str, icon_path: Path, on_show, on_exit) -> None:
+    def __init__(self, tooltip: str, icon_path: Path, on_show, on_exit, on_check_update=None) -> None:
         self._tooltip = tooltip[:127]
         self._icon_path = str(icon_path)
         self._on_show = on_show
         self._on_exit = on_exit
+        self._on_check_update = on_check_update
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._error: Exception | None = None
@@ -147,6 +152,20 @@ class TrayIcon:
 
     def is_alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive() and self._added)
+
+    def notify(self, title: str, message: str) -> bool:
+        """托盘气泡通知（Windows 通知中心）。图标未就绪时返回 False，由调用方回退应用内提示。"""
+        if not self._added:
+            return False
+        data = NOTIFYICONDATAW()
+        data.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+        data.hWnd = self._window
+        data.uID = 1
+        data.uFlags = NIF_INFO
+        data.szInfo = message[:255]
+        data.szInfoTitle = title[:63]
+        data.dwInfoFlags = NIIF_INFO
+        return bool(SHELL32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(data)))
 
     def stop(self) -> None:
         if self._window:
@@ -241,6 +260,9 @@ class TrayIcon:
         USER32.SetForegroundWindow(hwnd)
         menu = USER32.CreatePopupMenu()
         USER32.AppendMenuW(menu, MF_STRING, self.MENU_SHOW, "显示主窗口")
+        if self._on_check_update is not None:
+            USER32.AppendMenuW(menu, MF_STRING, self.MENU_CHECK_UPDATE, "检查更新")
+        USER32.AppendMenuW(menu, MF_SEPARATOR, 0, "")
         USER32.AppendMenuW(menu, MF_STRING, self.MENU_EXIT, "退出点点")
         point = POINT()
         USER32.GetCursorPos(ctypes.byref(point))
@@ -249,5 +271,7 @@ class TrayIcon:
         USER32.DestroyMenu(menu)
         if selected == self.MENU_SHOW:
             self._on_show()
+        elif selected == self.MENU_CHECK_UPDATE:
+            self._on_check_update()
         elif selected == self.MENU_EXIT:
             self._on_exit()

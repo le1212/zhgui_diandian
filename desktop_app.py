@@ -12,13 +12,16 @@ import json
 import math
 import os
 import queue
+import re
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
 import uuid
 from collections import OrderedDict
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 from PIL import Image, ImageDraw, ImageGrab, ImageTk
 
@@ -29,19 +32,27 @@ from raw_input import RawInputRecorder, key_name
 from run_engine import RunEngine, RunPlan
 from scheduler import Scheduler
 from task_repository import TaskRepository
+from theme import THEME_NAME
 from tray_icon import TrayIcon
 from widgets import (
-    BORDER, CARD_BG, CheckBox, FIELD_BORDER, F, GRAY, GREEN, GREEN_DEEP,
-    GREEN_HOVER, GREEN_TEXT, HEADER_BG, HelpIcon, INK, INK_SOFT, MAIN_BG, M,
-    NumberField, PANEL_BG, PILL_ACTIVE, PillButton, RoundedCard, S, Select,
-    SIDEBAR_BG, TextField, brand_icon_image, mix, paint_icon, rounded_rect,
+    BORDER, BORDER_SOFT, CARD_BG, CheckBox, ContextMenu, DANGER_BG,
+    DANGER_DEEP, DANGER_FG, DANGER_HOVER, DANGER_SOFT_BG, FIELD_BORDER, F,
+    GRAY, GREEN, GREEN_BRIGHT, GREEN_DEEP, GREEN_HOVER, GREEN_TEXT, HEADER_BG, HelpIcon,
+    ICON_MUTED, INK, INK_SOFT, INFO_BLUE, LIST_BG, LIST_BORDER, MAIN_BG, M,
+    NEUTRAL_HOVER, NumberField, ON_COLOR_FG, OVERLAY_ACCENT, OVERLAY_BG,
+    OVERLAY_BUTTON, OVERLAY_BUTTON_HOVER, OVERLAY_INK_SOFT, PANEL_BG, PILL_ACTIVE, PillButton,
+    RoundedCard, ROW_HOVER, RUNNING_BG, RUNNING_PEAK, S, Select, SIDEBAR_BG,
+    SUBTLE_BG, SUBTLE_HOVER, TASK_ACTIVE_FG, TASK_FG, TextField,
+    ThinScrollbar, TOAST_BG, TOAST_FG, TOOLBAR_BG, TOOLBAR_FG,
+    TOOLBAR_HOVER, brand_icon_image, mix, paint_icon, rounded_rect, shade,
     text_font,
 )
 from winapi import (
     HWND_TOPMOST, POINT, SWP_SHOWWINDOW, USER32, VK_ESCAPE, VK_F2, VK_F6,
     VK_F7, acquire_mutex, activate_window_by_title, click_at,
-    cursor_position, enable_per_monitor_dpi_awareness, paste_text,
-    scroll_at, send_key, window_rect, window_title,
+    cursor_position, enable_per_monitor_dpi_awareness, monitor_workarea_at,
+    monitor_workareas, paste_text, release_mutex, scroll_at, send_key, window_rect,
+    window_title,
 )
 from window_coordinator import WindowCoordinator
 
@@ -59,19 +70,26 @@ STEP_READOUT_LABELS = {
 
 
 class DesktopClicker:
+    # 运行按钮呼吸动画的两端色（深红 ↔ 亮红），由 _run_breath_tick 插值
+    _RUN_BREATH_BASE = RUNNING_BG
+    _RUN_BREATH_PEAK = RUNNING_PEAK
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("点点")
-        self.root.geometry(f"{S(1500)}x{S(920)}")
-        self.root.minsize(S(1180), S(760))
-        self.root.configure(bg=MAIN_BG)
-        self.root.state("zoomed")
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
-        self.root.bind("<Map>", self._on_window_restore)
-
         configured_data_dir = os.environ.get("DIANDIAN_DATA_DIR")
         self.app_data_dir = Path(configured_data_dir) if configured_data_dir else Path(os.environ.get("APPDATA", Path.home())) / "Diandian"
         self.repository = TaskRepository(self.app_data_dir)
+        self._ui_state = self.repository.load_ui_state()
+        self._status_history: list[tuple[float, str, str]] = []
+        self._history_bubble: tk.Toplevel | None = None
+        self._history_show_job: str | None = None
+        self._toast: tk.Toplevel | None = None
+        self.root.minsize(S(1180), S(760))
+        self.root.configure(bg=MAIN_BG)
+        self._restore_window_placement()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Map>", self._on_window_restore)
         self.thumbs_dir = self.app_data_dir / "thumbs"
         self.thumbs_dir.mkdir(parents=True, exist_ok=True)
         self.tasks = self.repository.load_tasks()
@@ -169,6 +187,42 @@ class DesktopClicker:
         self._build_settings(body)
         self._build_statusbar(main)
 
+    def _restore_window_placement(self) -> None:
+        """恢复上次窗口位置/尺寸；记录缺失或不可信（显示器已拔等）时回退默认最大化。"""
+        self.root.geometry(f"{S(1500)}x{S(920)}")
+        placement = self._ui_state.get("main_window")
+        if not isinstance(placement, dict) or placement.get("zoomed"):
+            self.root.state("zoomed")
+            return
+        match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", str(placement.get("geometry") or ""))
+        if not match:
+            self.root.state("zoomed")
+            return
+        width, height, x, y = (int(value) for value in match.groups())
+        if width < S(1180) or height < S(760):
+            self.root.state("zoomed")
+            return
+        center_x, center_y = x + width // 2, y + height // 2
+        visible = any(
+            work_x <= center_x < work_x + work_w and work_y <= center_y < work_y + work_h
+            for work_x, work_y, work_w, work_h in monitor_workareas()
+        )
+        if visible:
+            self.root.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        else:
+            self.root.state("zoomed")
+
+    def _persist_window_placement(self) -> None:
+        try:
+            zoomed = self.root.state() == "zoomed"
+            self._ui_state["main_window"] = {
+                "zoomed": zoomed,
+                "geometry": None if zoomed else self.root.geometry(),
+            }
+            self.repository.save_ui_state(self._ui_state)
+        except (OSError, tk.TclError):
+            pass
+
     def _build_sidebar(self) -> None:
         sidebar = tk.Frame(self.root, width=S(310), bg=SIDEBAR_BG, highlightthickness=1, highlightbackground=BORDER)
         sidebar.pack(side="left", fill="y")
@@ -183,8 +237,8 @@ class DesktopClicker:
         brand_text.pack(side="left", padx=(S(12), 0))
         tk.Label(brand_text, text="点点 · 桌面连点器", bg=SIDEBAR_BG, fg=INK, font=F(17, "bold")).pack(anchor="w")
         tk.Label(brand_text, text="让重复操作变得更简单", bg=SIDEBAR_BG, fg=GRAY, font=F(11)).pack(anchor="w", pady=(S(3), 0))
-        tk.Label(brand_text, text="By Zhgui", bg=SIDEBAR_BG, fg="#a8bab4", font=F(10)).pack(anchor="w", pady=(S(2), 0))
-        self.tasks_item = PillButton(sidebar, "我的任务", self._toggle_task_list, width=S(272), height=S(44), radius=S(10), bg=SIDEBAR_BG, hover_bg="#e9f4ef", fg=INK, icon="tasks", icon_color="#33454e", font=F(13), align="left", trailing="chevron-up")
+        tk.Label(brand_text, text="By Zhgui", bg=SIDEBAR_BG, fg=ICON_MUTED, font=F(10)).pack(anchor="w", pady=(S(2), 0))
+        self.tasks_item = PillButton(sidebar, "我的任务", self._toggle_task_list, width=S(272), height=S(44), radius=S(10), bg=SIDEBAR_BG, hover_bg=ROW_HOVER, fg=INK, icon="tasks", icon_color=INK_SOFT, font=F(13), align="left", trailing="chevron-up")
         self.tasks_item.pack(padx=S(18), pady=(S(30), S(4)))
         # 底栏固定在侧边栏底部，任务再多也不会把它顶出可视区
         footer = tk.Frame(sidebar, bg=SIDEBAR_BG)
@@ -194,17 +248,17 @@ class DesktopClicker:
         rounded_rect(shortcuts, 0, 0, S(259), S(151), S(12), fill=PANEL_BG, outline="")
         for index, (key, action) in enumerate((("F2", "捕获位置"), ("F6", "运行 / 停止"), ("F7", "暂停 / 继续"), ("Esc", "紧急停止"))):
             y = S(18) + index * S(31)
-            shortcuts.create_text(S(20), y + S(8), text=key, anchor="w", fill="#7d938e", font=M(11))
-            shortcuts.create_text(S(62), y + S(8), text=action, anchor="w", fill="#4d625c", font=F(11))
+            shortcuts.create_text(S(20), y + S(8), text=key, anchor="w", fill=ICON_MUTED, font=M(11))
+            shortcuts.create_text(S(62), y + S(8), text=action, anchor="w", fill=TOOLBAR_FG, font=F(11))
         task_actions = tk.Frame(footer, bg=SIDEBAR_BG)
         task_actions.pack(side="bottom", fill="x", padx=S(24), pady=(0, S(16)))
-        PillButton(task_actions, "复制", self.duplicate_task, width=S(76), height=S(30), radius=S(8), bg=CARD_BG, fg=INK_SOFT, border=FIELD_BORDER, hover_bg="#f2f9f6", font=F(12)).pack(side="left")
-        PillButton(task_actions, "删除", self.delete_task, width=S(76), height=S(30), radius=S(8), bg=CARD_BG, fg="#b3423f", border=FIELD_BORDER, hover_bg="#fdeceb", font=F(12)).pack(side="left", padx=(S(6), 0))
-        self.trash_button = PillButton(task_actions, "回收站", self.show_trash, width=S(96), height=S(30), radius=S(8), bg=CARD_BG, fg=INK_SOFT, border=FIELD_BORDER, hover_bg="#f2f9f6", font=F(12))
+        PillButton(task_actions, "复制", self.duplicate_task, width=S(76), height=S(30), radius=S(8), bg=CARD_BG, fg=INK_SOFT, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12)).pack(side="left")
+        PillButton(task_actions, "删除", self.delete_task, width=S(76), height=S(30), radius=S(8), bg=CARD_BG, fg=DANGER_FG, border=FIELD_BORDER, hover_bg=DANGER_BG, font=F(12)).pack(side="left", padx=(S(6), 0))
+        self.trash_button = PillButton(task_actions, "回收站", self.show_trash, width=S(96), height=S(30), radius=S(8), bg=CARD_BG, fg=INK_SOFT, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12))
         self.trash_button.pack(side="left", padx=(S(6), 0))
-        self.new_button = PillButton(footer, "新建任务", self.new_task, width=S(260), height=S(46), radius=S(10), bg=GREEN, fg="#ffffff", hover_bg=GREEN_HOVER, icon="plus", icon_color="#ffffff", font=F(14, "bold"))
+        self.new_button = PillButton(footer, "新建任务", self.new_task, width=S(260), height=S(46), radius=S(10), bg=GREEN, fg=ON_COLOR_FG, hover_bg=GREEN_HOVER, icon="plus", icon_color=ON_COLOR_FG, font=F(14, "bold"))
         self.new_button.pack(side="bottom", padx=S(24), pady=(S(16), S(8)))
-        self.schedule_button = PillButton(footer, "定时任务", self.show_schedules, width=S(260), height=S(34), radius=S(9), bg=CARD_BG, fg=INK_SOFT, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12, "bold"))
+        self.schedule_button = PillButton(footer, "定时任务", self.show_schedules, width=S(260), height=S(34), radius=S(9), bg=CARD_BG, fg=INK_SOFT, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12, "bold"))
         self.schedule_button.pack(side="bottom", padx=S(24), pady=(0, S(8)))
         # 中间区域只放任务列表，超出时滚动
         self.task_scroll = tk.Canvas(sidebar, bg=SIDEBAR_BG, highlightthickness=0)
@@ -214,6 +268,7 @@ class DesktopClicker:
         self.task_column.bind("<Configure>", lambda _event: self.task_scroll.configure(scrollregion=self.task_scroll.bbox("all")))
         self.task_scroll.bind("<Configure>", lambda event: self.task_scroll.itemconfigure(self.task_window, width=event.width))
         self.task_scroll.bind("<MouseWheel>", self._on_task_scroll)
+        ThinScrollbar(sidebar, self.task_scroll)
         self._render_task_list()
 
     def _build_header(self, parent: tk.Frame) -> None:
@@ -223,9 +278,43 @@ class DesktopClicker:
         crumb = tk.Frame(header, bg=HEADER_BG)
         crumb.place(x=S(36), rely=0.5, anchor="w")
         tk.Label(crumb, text="我的任务", bg=HEADER_BG, fg=GRAY, font=F(12)).pack(side="left")
-        tk.Label(crumb, text="/", bg=HEADER_BG, fg="#c3d2cd", font=F(12)).pack(side="left", padx=S(14))
+        tk.Label(crumb, text="/", bg=HEADER_BG, fg=BORDER_SOFT, font=F(12)).pack(side="left", padx=S(14))
         self.breadcrumb_task = tk.Label(crumb, text="桌面连点", bg=HEADER_BG, fg=INK, font=F(12, "bold"))
         self.breadcrumb_task.pack(side="left")
+        theme_button = PillButton(
+            header, "深色模式" if THEME_NAME == "light" else "浅色模式", self._toggle_theme,
+            width=S(96), height=S(30), radius=S(8), bg=HEADER_BG, fg=INK_SOFT,
+            border=BORDER, hover_bg=NEUTRAL_HOVER, font=F(11, "bold"),
+        )
+        theme_button.place(relx=1.0, x=-S(28), rely=0.5, anchor="e")
+
+    def _toggle_theme(self) -> None:
+        """切换浅/深主题：写入偏好后重启进程生效（调色板在导入期定色）。"""
+        target = "dark" if THEME_NAME == "light" else "light"
+        self._ui_state["theme"] = target
+        try:
+            self.repository.save_ui_state(self._ui_state)
+        except OSError as error:
+            self.show_toast(f"主题保存失败：{error}", kind="error")
+            return
+        label = "深色" if target == "dark" else "浅色"
+        if not self._ask_confirm("切换主题", f"已选择{label}模式，重启点点后生效。\n\n现在就重启吗？", confirm_text="重启"):
+            return
+        self._persist_window_placement()
+        if getattr(sys, "frozen", False):
+            command = [sys.executable]
+        else:
+            command = [sys.executable, os.path.abspath(__file__)]
+        # 先释放单实例互斥体再拉起新进程：旧进程退出与新进程启动的先后不可控，
+        # 不释放会让新实例误判双开而直接退出
+        release_mutex()
+        try:
+            subprocess.Popen(command)
+        except OSError:
+            self._set_status("自动重启失败，请手动重启点点")
+            return
+        self._exit_requested = True
+        self.close()  # 复用完整收尾：停运行/录制、保存任务与计划、移除托盘图标
 
     def _build_toolbar(self, parent: tk.Frame) -> None:
         hero = tk.Frame(parent, bg=MAIN_BG)
@@ -242,19 +331,19 @@ class DesktopClicker:
         bar = tk.Frame(parent, bg=MAIN_BG)
         bar.pack(fill="x", padx=S(36), pady=(S(17), 0))
         Select(bar, self.mode_var, ("单点连点", "多点任务", "录制操作"), width=S(108), height=S(38), command=self._mode_changed, font=F(15, "bold")).pack(side="left")
-        self.capture_button = PillButton(bar, "捕获位置 (F2)", self.arm_capture, width=S(115), height=S(38), radius=S(7), bg="#ffffff", fg=GREEN_TEXT, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(14, "bold"))
+        self.capture_button = PillButton(bar, "捕获位置 (F2)", self.arm_capture, width=S(115), height=S(38), radius=S(7), bg=CARD_BG, fg=GREEN_TEXT, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(14, "bold"))
         self.capture_button.pack(side="left", padx=(S(10), 0))
-        self.clear_position_button = PillButton(bar, "清除位置", self.clear_position, width=S(84), height=S(38), radius=S(7), bg="#ffffff", fg="#8a5250", border=FIELD_BORDER, hover_bg="#fff1f0", font=F(14, "bold"))
+        self.clear_position_button = PillButton(bar, "清除位置", self.clear_position, width=S(84), height=S(38), radius=S(7), bg=CARD_BG, fg=DANGER_FG, border=FIELD_BORDER, hover_bg=DANGER_SOFT_BG, font=F(14, "bold"))
         self.clear_position_button.pack(side="left", padx=(S(6), 0))
-        self.record_button = PillButton(bar, "开始录制", self.toggle_recording, width=S(84), height=S(38), radius=S(7), bg="#ffffff", fg="#3a4c55", border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(14, "bold"))
+        self.record_button = PillButton(bar, "开始录制", self.toggle_recording, width=S(84), height=S(38), radius=S(7), bg=CARD_BG, fg=INK_SOFT, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(14, "bold"))
         self.record_button.pack(side="left", padx=(S(10), 0))
-        self.save_button = PillButton(bar, "保存任务", self.save_task, width=S(106), height=S(35), radius=S(7), bg="#ffffff", fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", icon="floppy", icon_color="#3f5259", font=F(12, "bold"), icon_size=S(14))
+        self.save_button = PillButton(bar, "保存任务", self.save_task, width=S(106), height=S(35), radius=S(7), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, icon="floppy", icon_color=INK_SOFT, font=F(12, "bold"), icon_size=S(14))
         self.save_button.pack(side="right", padx=(S(6), 0))
-        self.export_button = PillButton(bar, "导出", self.export_task, width=S(72), height=S(35), radius=S(7), bg="#ffffff", fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12, "bold"))
+        self.export_button = PillButton(bar, "导出", self.export_task, width=S(72), height=S(35), radius=S(7), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12, "bold"))
         self.export_button.pack(side="right", padx=(S(6), 0))
-        self.import_button = PillButton(bar, "导入", self.import_task, width=S(72), height=S(35), radius=S(7), bg="#ffffff", fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12, "bold"))
+        self.import_button = PillButton(bar, "导入", self.import_task, width=S(72), height=S(35), radius=S(7), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12, "bold"))
         self.import_button.pack(side="right", padx=(S(6), 0))
-        self.run_button = PillButton(bar, "开始运行 (F6)", self.toggle_run, width=S(150), height=S(35), radius=S(7), bg=GREEN, fg="#ffffff", hover_bg=GREEN_HOVER, icon="play", icon_color="#ffffff", font=F(12, "bold"), icon_size=S(14))
+        self.run_button = PillButton(bar, "开始运行 (F6)", self.toggle_run, width=S(150), height=S(35), radius=S(7), bg=GREEN, fg=ON_COLOR_FG, hover_bg=GREEN_HOVER, icon="play", icon_color=ON_COLOR_FG, font=F(12, "bold"), icon_size=S(14))
         self.run_button.pack(side="right", padx=(0, S(10)))
 
     def _build_workspace(self, parent: tk.Frame) -> None:
@@ -266,7 +355,7 @@ class DesktopClicker:
         pin = tk.Canvas(head, width=S(18), height=S(18), bg=CARD_BG, highlightthickness=0)
         pin.pack(side="left")
         paint_icon(pin, "pin", S(9), S(9), S(16), GREEN, CARD_BG)
-        self.workspace_kind = tk.Label(head, text="定位工作区", bg=CARD_BG, fg="#5d8290", font=F(12, "bold"))
+        self.workspace_kind = tk.Label(head, text="定位工作区", bg=CARD_BG, fg=INFO_BLUE, font=F(12, "bold"))
         self.workspace_kind.pack(side="left", padx=(S(8), 0))
         self.workspace_heading = tk.Label(body, text="在真实桌面上捕获位置", bg=CARD_BG, fg=INK, font=F(22, "bold"))
         self.workspace_heading.pack(anchor="w", padx=S(26), pady=(S(10), 0))
@@ -281,7 +370,7 @@ class DesktopClicker:
         self._readout_divider(self.readout_frame)
         self.readout_action, self.readout_action_title = self._readout_item(self.readout_frame, "target", "点击方式")
         # 预览区画布：单点模式占满中间，多点/录制模式贴底显示截图
-        self.workspace = tk.Canvas(body, bg="#f4faf6", highlightthickness=0, relief="flat", cursor="hand2")
+        self.workspace = tk.Canvas(body, bg=TOOLBAR_BG, highlightthickness=0, relief="flat", cursor="hand2")
         self.workspace.bind("<Button-1>", self._workspace_click)
         self.workspace.bind("<Configure>", self._schedule_preview_redraw)
         # 执行路径固定高度（4 行列表，超出在列表内滚动），出现时由预览区让高
@@ -299,8 +388,8 @@ class DesktopClicker:
         )
         for label, command in toolbar_actions:
             text_width = text_font(F(11)).measure(label)
-            PillButton(self.step_toolbar, label, command, width=text_width + S(14), height=S(32), radius=S(7), bg="#f4faf7", fg="#49625b", hover_bg="#dcf0e7", font=F(11)).pack(side="left", padx=(0, S(2)))
-        self.step_list = tk.Listbox(self.path_panel, height=1, selectmode=tk.EXTENDED, bg="#fbfdfc", fg="#4f5c53", selectbackground=PILL_ACTIVE, selectforeground=GREEN_TEXT, highlightthickness=1, highlightbackground="#e4eeee", relief="flat", font=M(12))
+            PillButton(self.step_toolbar, label, command, width=text_width + S(14), height=S(32), radius=S(7), bg=TOOLBAR_BG, fg=TOOLBAR_FG, hover_bg=TOOLBAR_HOVER, font=F(11)).pack(side="left", padx=(0, S(2)))
+        self.step_list = tk.Listbox(self.path_panel, height=1, selectmode=tk.EXTENDED, bg=LIST_BG, fg=TOOLBAR_FG, selectbackground=PILL_ACTIVE, selectforeground=GREEN_TEXT, highlightthickness=1, highlightbackground=LIST_BORDER, relief="flat", font=M(12))
         self.step_list.pack(fill="both", expand=True, pady=(S(12), S(12)))
         self.step_list.bind("<Double-Button-1>", self.edit_step)
         self.step_list.bind("<Delete>", lambda _event: self.delete_step())
@@ -308,36 +397,39 @@ class DesktopClicker:
         self.step_list.bind("<ButtonRelease-1>", self._step_drag_end)
         self.step_list.bind("<<ListboxSelect>>", self._update_step_readout)
         self.step_list.bind("<Button-3>", self._show_step_context_menu)
+        ThinScrollbar(self.path_panel, self.step_list)
+        self.step_hint = tk.Label(self.path_panel, text="双击编辑 · Del 删除 · 拖动排序 · 右键更多", bg=CARD_BG, fg=GRAY, font=F(11), anchor="w")
+        self.step_hint.pack(fill="x", pady=(0, S(10)))
         self._build_step_context_menu()
+        # 任务列表快捷菜单全程复用同一实例，配合 ContextMenu 的单例互斥保证永不叠加
+        self._task_menu = ContextMenu(self.root)
+        self._task_menu_tag: int | None = None
 
     def _build_step_context_menu(self) -> None:
-        """步骤列表右键快捷菜单。"""
-        menu = tk.Menu(self.root, tearoff=0, bg="#ffffff", fg=INK, font=F(12), activebackground="#e8f5ee", activeforeground=GREEN_TEXT)
-        menu.add_command(label="添加位置 (F2)", command=self.arm_capture)
-        menu.add_command(label="添加等待", command=self.add_wait_step)
-        menu.add_command(label="添加滚轮", command=self.add_scroll_step)
-        menu.add_command(label="添加按键", command=self.add_key_step)
-        menu.add_command(label="添加文字", command=self.add_text_step)
-        menu.add_command(label="添加图像点击", command=self.start_image_capture)
-        menu.add_command(label="添加如果图像", command=self.add_if_image_step)
+        """步骤列表右键快捷菜单（自定义圆角菜单）。"""
+        menu = ContextMenu(self.root)
+        menu.add_command("添加位置 (F2)", self.arm_capture, icon="crosshair")
+        menu.add_command("添加等待", self.add_wait_step, icon="clock")
+        menu.add_command("添加滚轮", self.add_scroll_step, icon="scroll")
+        menu.add_command("添加按键", self.add_key_step, icon="keyboard")
+        menu.add_command("添加文字", self.add_text_step, icon="type")
+        menu.add_command("添加图像点击", self.start_image_capture, icon="image")
+        menu.add_command("添加如果图像", self.add_if_image_step, icon="branch")
         menu.add_separator()
-        menu.add_command(label="编辑步骤", command=self.edit_step)
-        menu.add_command(label="复制步骤 (Ctrl+D)", command=self.duplicate_step)
-        menu.add_command(label="启用/停用", command=self.toggle_step_enabled)
+        menu.add_command("编辑步骤", self.edit_step, icon="edit")
+        menu.add_command("复制步骤 (Ctrl+D)", self.duplicate_step, icon="copy")
+        menu.add_command("启用/停用", self.toggle_step_enabled, icon="toggle")
         menu.add_separator()
-        menu.add_command(label="删除选中 (Del)", command=self.delete_step)
-        menu.add_command(label="清空路径", command=self.clear_path)
+        menu.add_command("删除选中 (Del)", self.delete_step, icon="trash", danger=True)
+        menu.add_command("清空路径", self.clear_path, icon="broom")
         self._step_context_menu = menu
 
-    def _show_step_context_menu(self, event) -> None:
+    def _show_step_context_menu(self, event) -> str:
         if not self._editing_allowed():
-            return
-        try:
-            self._step_context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self._step_context_menu.grab_release()
-
-
+            return ""
+        self._step_context_menu.popup(event.x_root, event.y_root,
+                                      workarea=monitor_workarea_at(event.x_root, event.y_root))
+        return "break"  # 阻止冒泡到主窗口的“点外收起”绑定，避免菜单被同一次右键关闭
 
     _ONBOARDING_STEPS = [
         ("选择模式", "顶部可切换「单点连点」「多点任务」「录制操作」三种模式。\n单点适合固定位置连点，多点适合按顺序执行多个动作。", "下一步"),
@@ -358,7 +450,7 @@ class DesktopClicker:
 
         dialog = tk.Toplevel(self.root)
         dialog.overrideredirect(True)
-        dialog.configure(bg="#2a3a35")
+        dialog.configure(bg=OVERLAY_BG)
         dialog.minsize(S(460), S(220))
         dialog.maxsize(S(460), S(220))
         self._onboarding_dialog = dialog
@@ -390,7 +482,7 @@ class DesktopClicker:
                              command=self._finish_onboarding)
         skip_btn.pack(side="left")
 
-        next_btn = tk.Button(btn_row, text="", bg=GREEN, fg="#ffffff", font=F(12, "bold"), relief="flat", cursor="hand2",
+        next_btn = tk.Button(btn_row, text="", bg=GREEN, fg=ON_COLOR_FG, font=F(12, "bold"), relief="flat", cursor="hand2",
                              padx=S(20), pady=S(6), command=self._onboarding_next)
         next_btn.pack(side="right")
         self._onboarding_next_btn = next_btn
@@ -414,7 +506,7 @@ class DesktopClicker:
         self._onboarding_next_btn.configure(text=btn_text)
         for i, dot in enumerate(self._onboarding_dots):
             dot.delete("all")
-            color = GREEN if i <= idx else "#d0ddd8"
+            color = GREEN if i <= idx else BORDER_SOFT
             dot.create_oval(0, 0, S(10), S(10), fill=color, outline="")
 
     def _onboarding_next(self) -> None:
@@ -457,7 +549,7 @@ class DesktopClicker:
 
     @staticmethod
     def _readout_divider(parent: tk.Frame) -> None:
-        tk.Frame(parent, width=1, bg="#e8f1ed").pack(side="left", fill="y", padx=S(6))
+        tk.Frame(parent, width=1, bg=LIST_BORDER).pack(side="left", fill="y", padx=S(6))
 
     def _build_settings(self, parent: tk.Frame) -> None:
         card = RoundedCard(parent, width=S(450), radius=S(20))
@@ -467,7 +559,7 @@ class DesktopClicker:
         head.pack(fill="x", padx=S(26), pady=(S(24), 0))
         gear = tk.Canvas(head, width=S(20), height=S(20), bg=CARD_BG, highlightthickness=0)
         gear.pack(side="left")
-        paint_icon(gear, "gear", S(10), S(10), S(17), "#3f5259", CARD_BG)
+        paint_icon(gear, "gear", S(10), S(10), S(17), INK_SOFT, CARD_BG)
         tk.Label(head, text="任务设置", bg=CARD_BG, fg=INK, font=F(16, "bold")).pack(side="left", padx=(S(8), 0))
         form = tk.Frame(body, bg=CARD_BG)
         form.pack(fill="x", padx=S(26), pady=(S(18), S(24)))
@@ -505,13 +597,17 @@ class DesktopClicker:
         bar = tk.Frame(parent, bg=MAIN_BG, height=S(31))
         bar.pack(fill="x", padx=S(36), pady=(S(14), S(12)))
         bar.pack_propagate(False)
-        self.status_label = tk.Label(bar, text="●  准备就绪", bg=MAIN_BG, fg=GREEN, font=F(12, "bold"))
+        self.status_label = tk.Label(bar, text="●  准备就绪", bg=MAIN_BG, fg=GREEN, font=F(12, "bold"), cursor="hand2")
         self.status_label.pack(side="left")
+        # 悬停回看最近状态消息；关键调度结果不再一闪而过
+        self.status_label.bind("<Enter>", lambda _e: self._schedule_status_history())
+        self.status_label.bind("<Leave>", lambda _e: self._hide_status_history())
+        self.status_label.bind("<Button-1>", lambda _e: self._show_status_history())
         self.run_info = tk.Label(bar, text="运行状态：未启动", bg=MAIN_BG, fg=GRAY, font=F(11))
         self.run_info.pack(side="right")
         status_dot = tk.Canvas(bar, width=S(14), height=S(14), bg=MAIN_BG, highlightthickness=0)
         status_dot.pack(side="right", padx=(0, S(6)))
-        paint_icon(status_dot, "target", S(7), S(7), S(10), "#9db0aa", MAIN_BG)
+        paint_icon(status_dot, "target", S(7), S(7), S(10), ICON_MUTED, MAIN_BG)
 
     # ------------------------------------------------------------------
     # 预览区绘制
@@ -537,7 +633,7 @@ class DesktopClicker:
             return
         cv.delete("all")
         self._empty_btn_rect = None
-        rounded_rect(cv, 0, 0, width - 1, height - 1, S(12), fill="#f4faf6", outline="")
+        rounded_rect(cv, 0, 0, width - 1, height - 1, S(12), fill=TOOLBAR_BG, outline="")
         if self._screen_thumb is not None and self._preview_point:
             self._draw_screen_thumb(cv, width, height, self._preview_point)
         else:
@@ -557,7 +653,7 @@ class DesktopClicker:
         draw_w, draw_h = max(1, round(self._screen_thumb.width * scale)), max(1, round(self._screen_thumb.height * scale))
         ox, oy = round((width - draw_w) / 2), round((height - draw_h) / 2)
         self._thumb_display_rect = (ox, oy, draw_w, draw_h)
-        self._paint_dot_grid(cv, margin, margin, width - margin, height - margin, S(24), "#e4efe9")
+        self._paint_dot_grid(cv, margin, margin, width - margin, height - margin, S(24), BORDER_SOFT)
         if (draw_w, draw_h) != self._thumb_render_size:
             resized = self._screen_thumb.resize((draw_w, draw_h), Image.Resampling.BILINEAR)
             self._thumb_photo = ImageTk.PhotoImage(resized)
@@ -579,8 +675,8 @@ class DesktopClicker:
         box_w = min(width - margin * 2, (height - margin * 2) * virtual_w / virtual_h)
         box_h = box_w * virtual_h / virtual_w
         ox, oy = (width - box_w) / 2, (height - box_h) / 2
-        self._paint_dot_grid(cv, margin, margin, width - margin, height - margin, S(24), "#e4efe9")
-        rounded_rect(cv, ox, oy, ox + box_w, oy + box_h, S(10), fill="#eef7f1", outline=BORDER)
+        self._paint_dot_grid(cv, margin, margin, width - margin, height - margin, S(24), BORDER_SOFT)
+        rounded_rect(cv, ox, oy, ox + box_w, oy + box_h, S(10), fill=ROW_HOVER, outline=BORDER)
         if point:
             vx, vy = virtual_screen_origin()
             fx = min(.96, max(.04, (point[0] - vx) / virtual_w))
@@ -591,8 +687,8 @@ class DesktopClicker:
             bx, by = (width - btn_w) / 2, (height - btn_h) / 2
             self._empty_btn_rect = (bx, by, bx + btn_w, by + btn_h)
             rounded_rect(cv, bx, by, bx + btn_w, by + btn_h, S(10), fill=GREEN, outline="")
-            cv.create_text(width / 2, height / 2, text="点击捕获第一个位置  F2", fill="#ffffff", font=F(13, "bold"))
-            cv.create_text(width / 2, by + btn_h + S(18), text="捕获时点点会暂时隐藏，点击目标位置即可", fill="#9db0aa", font=F(11))
+            cv.create_text(width / 2, height / 2, text="点击捕获第一个位置  F2", fill=ON_COLOR_FG, font=F(13, "bold"))
+            cv.create_text(width / 2, by + btn_h + S(18), text="捕获时点点会暂时隐藏，点击目标位置即可", fill=ICON_MUTED, font=F(11))
 
     def _paint_dot_grid(self, cv: tk.Canvas, x1: float, y1: float, x2: float, y2: float, step: float, color: str) -> None:
         """用一张预渲染 PIL 图贴出点阵，避免 resize 时在 Tk 上创建上百个 oval item。"""
@@ -630,7 +726,7 @@ class DesktopClicker:
         if by + box_h > cv.winfo_height() - S(4):
             by = cy - box_h - S(6)
         rounded_rect(cv, bx, by, bx + box_w, by + box_h, box_h / 2, fill=GREEN_DEEP, outline="")
-        cv.create_text(bx + box_w / 2, by + box_h / 2, text=label, fill="#ffffff", font=font)
+        cv.create_text(bx + box_w / 2, by + box_h / 2, text=label, fill=ON_COLOR_FG, font=font)
 
     # ------------------------------------------------------------------
     # 任务数据
@@ -661,6 +757,8 @@ class DesktopClicker:
 
     def _render_task_list(self) -> None:
         self.trash_button.configure(text=f"回收站 ({len(self.trash)})" if self.trash else "回收站")
+        # 保存当前滚动位置，渲染后恢复，避免选中底部任务时列表跳回顶部
+        saved_scroll = self.task_scroll.yview()[0]
         for child in self.task_column.winfo_children():
             child.destroy()
         if self.tasks_expanded:
@@ -670,17 +768,40 @@ class DesktopClicker:
                     self.task_column, task.name,
                     lambda picked=index: self.select_task(picked),
                     width=S(252), height=S(38), radius=S(9),
-                    bg=PILL_ACTIVE if active else SIDEBAR_BG, hover_bg="#e6f3ee",
-                    fg="#157a5e" if active else "#5c6f6a",
+                    bg=PILL_ACTIVE if active else SIDEBAR_BG, hover_bg=ROW_HOVER,
+                    fg=TASK_ACTIVE_FG if active else TASK_FG,
                     icon="bolt" if active else "dot",
-                    icon_color=GREEN if active else "#9db0aa",
+                    icon_color=GREEN if active else ICON_MUTED,
                     font=F(12, "bold") if active else F(12),
                     align="left", padx=S(14),
                 )
                 button.pack(padx=S(28), pady=1)
                 button.bind("<MouseWheel>", self._on_task_scroll)
-        self.task_scroll.yview_moveto(0)
+                button.bind("<Button-3>", lambda e, picked=index: self._show_task_context_menu(e, picked))
+        self.task_scroll.yview_moveto(saved_scroll)
         self._task_list_signature = self._task_list_fingerprint()
+
+    def _show_task_context_menu(self, event, index: int) -> str:
+        """任务列表右键菜单：右键先选中高亮，再弹出圆角快捷菜单。
+
+        返回 "break" 阻止事件冒泡到主窗口的“点外收起”绑定，否则菜单刚弹出就会被同一次右键关闭。
+        """
+        if self.running:
+            self._set_status("任务运行中，停止后才能操作")
+            return ""
+        if self._task_menu.is_open() and self._task_menu_tag == index:
+            self._task_menu.close()  # 再次右键同一任务 = 收起，与系统菜单的开关语义一致
+            return "break"
+        if index != self.active_index:
+            self.select_task(index)
+        self._task_menu.clear()
+        self._task_menu.add_command("开始此任务", lambda: self.start_run(index), icon="play")
+        self._task_menu.add_separator()
+        self._task_menu.add_command("删除此任务", lambda: self.delete_task(), icon="trash", danger=True)
+        self._task_menu_tag = index
+        self._task_menu.popup(event.x_root, event.y_root,
+                              workarea=monitor_workarea_at(event.x_root, event.y_root))
+        return "break"
 
     def _task_list_fingerprint(self) -> tuple:
         """决定任务列表内容的因子：展开状态与各任务名称。"""
@@ -856,9 +977,9 @@ class DesktopClicker:
         body = tk.Frame(top, bg=MAIN_BG, padx=S(20), pady=S(16))
         body.pack(fill="both", expand=True)
         tk.Label(body, text="选择按键（双击直接确认）：", bg=MAIN_BG, fg=INK, font=F(13)).pack(anchor="w")
-        list_frame = tk.Frame(body, bg="#ffffff", highlightthickness=1, highlightbackground=FIELD_BORDER)
+        list_frame = tk.Frame(body, bg=CARD_BG, highlightthickness=1, highlightbackground=FIELD_BORDER)
         list_frame.pack(fill="both", expand=True, pady=(S(8), S(12)))
-        key_list = tk.Listbox(list_frame, height=10, font=F(12), bg="#ffffff", fg=INK,
+        key_list = tk.Listbox(list_frame, height=10, font=F(12), bg=CARD_BG, fg=INK,
                                selectbackground=PILL_ACTIVE, selectforeground=GREEN_TEXT,
                                highlightthickness=0, relief="flat", activestyle="none")
         key_list.pack(side="left", fill="both", expand=True)
@@ -891,11 +1012,11 @@ class DesktopClicker:
         def cancel(_e=None):
             top.destroy()
         PillButton(btn_row, "自定义键码", pick_custom, width=S(96), height=S(34), radius=S(8),
-                   bg="#ffffff", fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12)).pack(side="left")
+                   bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12)).pack(side="left")
         PillButton(btn_row, "确定", confirm, width=S(80), height=S(34), radius=S(8),
-                   bg=GREEN, fg="#ffffff", hover_bg=GREEN_HOVER, font=F(12, "bold")).pack(side="right")
+                   bg=GREEN, fg=ON_COLOR_FG, hover_bg=GREEN_HOVER, font=F(12, "bold")).pack(side="right")
         PillButton(btn_row, "取消", cancel, width=S(80), height=S(34), radius=S(8),
-                   bg="#ffffff", fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12)).pack(side="right", padx=(0, S(8)))
+                   bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12)).pack(side="right", padx=(0, S(8)))
         key_list.bind("<Double-Button-1>", confirm)
         top.bind("<Escape>", cancel)
         top.update_idletasks()
@@ -933,12 +1054,12 @@ class DesktopClicker:
         body = tk.Frame(top, bg=MAIN_BG, padx=S(24), pady=S(20))
         body.pack(fill="both", expand=True)
         tk.Label(body, text=label, bg=MAIN_BG, fg=INK, font=F(13)).pack(anchor="w")
-        entry = tk.Entry(body, width=36, font=F(13), bg="#ffffff", fg=INK, relief="flat", highlightthickness=1, highlightbackground=FIELD_BORDER, highlightcolor=GREEN)
+        entry = tk.Entry(body, width=36, font=F(13), bg=CARD_BG, fg=INK, relief="flat", highlightthickness=1, highlightbackground=FIELD_BORDER, highlightcolor=GREEN)
         entry.pack(fill="x", pady=(S(10), S(6)), ipady=S(8))
         entry.insert(0, str(initial))
         entry.select_range(0, tk.END)
         entry.focus_set()
-        error_label = tk.Label(body, text="", bg=MAIN_BG, fg="#c0392b", font=F(11))
+        error_label = tk.Label(body, text="", bg=MAIN_BG, fg=DANGER_FG, font=F(11))
         error_label.pack(anchor="w", pady=(0, S(12)))
         btn_row = tk.Frame(body, bg=MAIN_BG)
         btn_row.pack(fill="x")
@@ -968,8 +1089,8 @@ class DesktopClicker:
             top.destroy()
         def cancel(_e=None):
             top.destroy()
-        PillButton(btn_row, "确定", confirm, width=S(88), height=S(36), radius=S(8), bg=GREEN, fg="#ffffff", hover_bg=GREEN_HOVER, font=F(13, "bold")).pack(side="right")
-        PillButton(btn_row, "取消", cancel, width=S(88), height=S(36), radius=S(8), bg="#ffffff", fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(13)).pack(side="right", padx=(0, S(10)))
+        PillButton(btn_row, "确定", confirm, width=S(88), height=S(36), radius=S(8), bg=GREEN, fg=ON_COLOR_FG, hover_bg=GREEN_HOVER, font=F(13, "bold")).pack(side="right")
+        PillButton(btn_row, "取消", cancel, width=S(88), height=S(36), radius=S(8), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(13)).pack(side="right", padx=(0, S(10)))
         top.bind("<Return>", confirm)
         top.bind("<Escape>", cancel)
         self._center_dialog(top)
@@ -978,6 +1099,50 @@ class DesktopClicker:
 
     def _ask_text_dialog(self, title: str, label: str, initial: str = "") -> str | None:
         return self._ask_input_dialog(title, label, initial, input_type="str")
+
+    def _ask_confirm(self, title: str, message: str, *, danger: bool = False,
+                     confirm_text: str = "确定", cancel_text: str = "取消") -> bool:
+        """和项目风格一致的确认对话框，替代原生 messagebox。
+
+        危险操作时确认键为红色且默认焦点落在取消上（回车=取消），避免手滑回车直接确认破坏性操作。
+        """
+        result = {"confirmed": False}
+        top = tk.Toplevel(self.root)
+        top.title(title)
+        top.configure(bg=MAIN_BG)
+        top.resizable(False, False)
+        top.transient(self.root)
+        top.grab_set()
+        body = tk.Frame(top, bg=MAIN_BG, padx=S(24), pady=S(20))
+        body.pack(fill="both", expand=True)
+        width = S(420)
+        for line in message.splitlines():
+            tk.Label(body, text=line or " ", bg=MAIN_BG, fg=INK, font=F(13), wraplength=width - S(60), justify="left").pack(anchor="w", pady=(0, S(4)))
+        btn_row = tk.Frame(body, bg=MAIN_BG)
+        btn_row.pack(fill="x", pady=(S(14), 0))
+
+        def confirm(_e=None):
+            result["confirmed"] = True
+            top.destroy()
+
+        def cancel(_e=None):
+            top.destroy()
+
+        PillButton(btn_row, confirm_text, confirm, width=S(88), height=S(36), radius=S(8),
+                   bg=RUNNING_BG if danger else GREEN, fg=ON_COLOR_FG,
+                   hover_bg=shade(RUNNING_BG, 0.9) if danger else GREEN_HOVER, font=F(13, "bold")).pack(side="right")
+        PillButton(btn_row, cancel_text, cancel, width=S(88), height=S(36), radius=S(8),
+                   bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(13)).pack(side="right", padx=(0, S(10)))
+        top.bind("<Return>", cancel if danger else confirm)
+        top.bind("<Escape>", cancel)
+        if danger:
+            cancel_button = btn_row.winfo_children()[1]
+            cancel_button.focus_set()
+        else:
+            btn_row.winfo_children()[0].focus_set()
+        self._center_dialog(top)
+        self.root.wait_window(top)
+        return result["confirmed"]
 
     def add_text_step(self) -> None:
         if not self._editing_allowed():
@@ -1087,7 +1252,7 @@ class DesktopClicker:
     def clear_path(self) -> None:
         if not self._editing_allowed() or not self.steps:
             return
-        if not messagebox.askyesno("清空路径", f"确定清空当前路径吗？\n将移除全部 {len(self.steps)} 个步骤，任务设置会保留。", parent=self.root):
+        if not self._ask_confirm("清空路径", f"确定清空当前路径吗？\n将移除全部 {len(self.steps)} 个步骤，任务设置会保留。", danger=True, confirm_text="清空"):
             return
         removed = list(enumerate(self.steps))
         for _idx, step in removed:
@@ -1212,6 +1377,7 @@ class DesktopClicker:
         self.tasks_expanded = not self.tasks_expanded
         self.tasks_item.set_trailing("chevron-up" if self.tasks_expanded else "chevron-down")
         self._render_task_list()
+        self.task_scroll.yview_moveto(0)
 
     def _mode_changed(self, *_args) -> None:
         self._update_mode_ui()
@@ -1334,7 +1500,7 @@ class DesktopClicker:
             return
         top = tk.Toplevel(self.root)
         top.title("截图预览")
-        top.configure(bg="#1a1a1a")
+        top.configure(bg=OVERLAY_BG)
         top.attributes("-topmost", True)
         sw, sh = top.winfo_screenwidth(), top.winfo_screenheight()
         max_w, max_h = int(sw * 0.85), int(sh * 0.85)
@@ -1343,7 +1509,7 @@ class DesktopClicker:
         disp_w, disp_h = max(1, round(img.width * scale)), max(1, round(img.height * scale))
         resized = img.resize((disp_w, disp_h), Image.Resampling.BILINEAR) if scale < 1.0 else img
         photo = ImageTk.PhotoImage(resized)
-        canvas = tk.Canvas(top, width=disp_w, height=disp_h, bg="#1a1a1a", highlightthickness=0, cursor="hand2")
+        canvas = tk.Canvas(top, width=disp_w, height=disp_h, bg=OVERLAY_BG, highlightthickness=0, cursor="hand2")
         canvas.pack(padx=S(12), pady=S(12))
         canvas.create_image(0, 0, image=photo, anchor="nw")
         canvas._large_photo = photo
@@ -1361,7 +1527,7 @@ class DesktopClicker:
         if self.running:
             return
         self.capture_armed = True
-        self.capture_button.configure(text="移动鼠标后按 F2", bg="#e2f0e7")
+        self.capture_button.configure(text="移动鼠标后按 F2", bg=TOOLBAR_HOVER)
         self._set_status("等待捕获位置")
         self._show_capture_overlay()
 
@@ -1369,17 +1535,17 @@ class DesktopClicker:
         self._hide_capture_overlay(restore_main=False)
         overlay = tk.Toplevel(self.root)
         overlay.overrideredirect(True)
-        overlay.configure(bg="#18201b")
+        overlay.configure(bg=OVERLAY_BG)
         overlay.attributes("-topmost", True)
         overlay.geometry(self._overlay_geometry(S(560), S(66)))
-        overlay_frame = tk.Frame(overlay, bg="#18201b", padx=S(16), pady=S(10))
+        overlay_frame = tk.Frame(overlay, bg=OVERLAY_BG, padx=S(16), pady=S(10))
         overlay_frame.pack(fill="both", expand=True)
-        tk.Label(overlay_frame, text="⌖", bg="#18201b", fg="#79c99f", font=("Segoe UI Symbol", -S(24), "bold")).pack(side="left", padx=(0, S(11)))
-        copy = tk.Frame(overlay_frame, bg="#18201b")
+        tk.Label(overlay_frame, text="⌖", bg=OVERLAY_BG, fg=GREEN_BRIGHT, font=("Segoe UI Symbol", -S(24), "bold")).pack(side="left", padx=(0, S(11)))
+        copy = tk.Frame(overlay_frame, bg=OVERLAY_BG)
         copy.pack(side="left", fill="y")
-        tk.Label(copy, text="定位模式", bg="#18201b", fg="#ffffff", font=F(13, "bold")).pack(anchor="w")
-        tk.Label(copy, text="把鼠标移到目标位置，按 F2 确认；Esc 取消", bg="#18201b", fg="#b8c3bc", font=F(12)).pack(anchor="w", pady=(S(3), 0))
-        cancel = tk.Button(overlay_frame, text="取消  Esc", command=self.cancel_capture, bg="#303a33", fg="#ffffff", activebackground="#414d45", activeforeground="#ffffff", relief="flat", bd=0, padx=S(13), pady=S(7), font=F(12, "bold"))
+        tk.Label(copy, text="定位模式", bg=OVERLAY_BG, fg=ON_COLOR_FG, font=F(13, "bold")).pack(anchor="w")
+        tk.Label(copy, text="把鼠标移到目标位置，按 F2 确认；Esc 取消", bg=OVERLAY_BG, fg=OVERLAY_INK_SOFT, font=F(12)).pack(anchor="w", pady=(S(3), 0))
+        cancel = tk.Button(overlay_frame, text="取消  Esc", command=self.cancel_capture, bg=OVERLAY_BUTTON, fg=ON_COLOR_FG, activebackground=OVERLAY_BUTTON_HOVER, activeforeground=ON_COLOR_FG, relief="flat", bd=0, padx=S(13), pady=S(7), font=F(12, "bold"))
         cancel.pack(side="right")
         overlay.update_idletasks()
         self.capture_overlay = overlay
@@ -1399,7 +1565,7 @@ class DesktopClicker:
         if not self.capture_armed:
             return
         self.capture_armed = False
-        self.capture_button.configure(text="捕获位置 (F2)", bg="#ffffff")
+        self.capture_button.configure(text="捕获位置 (F2)", bg=CARD_BG)
         self._hide_capture_overlay()
         self._set_status("已取消定位")
 
@@ -1420,7 +1586,7 @@ class DesktopClicker:
                 relative_x=x - rect.left if rect else None, relative_y=y - rect.top if rect else None,
             )
             self.capture_armed = False
-            self.capture_button.configure(text="捕获位置 (F2)", bg="#ffffff")
+            self.capture_button.configure(text="捕获位置 (F2)", bg=CARD_BG)
             self._hide_capture_overlay(restore_main=False)
             self.root.update()
             time.sleep(0.08)
@@ -1488,8 +1654,8 @@ class DesktopClicker:
         canvas.pack(fill="both", expand=True)
         photo = ImageTk.PhotoImage(screenshot)
         canvas.create_image(0, 0, image=photo, anchor="nw")
-        canvas.create_rectangle(S(10), S(10), S(390), S(50), fill="#18201b", outline="")
-        canvas.create_text(S(20), S(18), text="拖动框选要识别的图像区域 · Esc 取消", anchor="nw", fill="#ffffff", font=F(14, "bold"))
+        canvas.create_rectangle(S(10), S(10), S(390), S(50), fill=OVERLAY_BG, outline="")
+        canvas.create_text(S(20), S(18), text="拖动框选要识别的图像区域 · Esc 取消", anchor="nw", fill=ON_COLOR_FG, font=F(14, "bold"))
         result = {"start": None, "rect": None, "box": None}
 
         def cancel(_event=None) -> None:
@@ -1602,8 +1768,8 @@ class DesktopClicker:
             params["confirmed"] = True
             self._if_image_dialog = None
             dlg.destroy()
-        PillButton(btn_row, "确定", confirm, width=S(80), height=S(34), radius=S(8), bg=GREEN, fg="#ffffff", hover_bg=GREEN_HOVER, font=F(12, "bold")).pack(side="right")
-        PillButton(btn_row, "取消", lambda: (setattr(self, "_if_image_dialog", None), dlg.destroy()), width=S(80), height=S(34), radius=S(8), bg="#ffffff", fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12)).pack(side="right", padx=(0, S(8)))
+        PillButton(btn_row, "确定", confirm, width=S(80), height=S(34), radius=S(8), bg=GREEN, fg=ON_COLOR_FG, hover_bg=GREEN_HOVER, font=F(12, "bold")).pack(side="right")
+        PillButton(btn_row, "取消", lambda: (setattr(self, "_if_image_dialog", None), dlg.destroy()), width=S(80), height=S(34), radius=S(8), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12)).pack(side="right", padx=(0, S(8)))
         self._center_dialog(dlg)
         self.root.wait_window(dlg)
         if not params["confirmed"]:
@@ -1627,7 +1793,7 @@ class DesktopClicker:
         if self.recording:
             self._stop_recording()
         else:
-            if self.steps and not messagebox.askyesno("重新录制", f"开始录制会替换当前 {len(self.steps)} 个步骤。继续吗？\n录制后仍可按 Ctrl+Z 恢复。", parent=self.root):
+            if self.steps and not self._ask_confirm("重新录制", f"开始录制会替换当前 {len(self.steps)} 个步骤。继续吗？\n录制后仍可按 Ctrl+Z 恢复。", confirm_text="继续"):
                 return
             if self.steps:
                 self.undo_stack.append(("steps", list(enumerate(self.steps))))
@@ -1640,7 +1806,7 @@ class DesktopClicker:
                 return
             self.recording = True
             self.last_record_time = time.perf_counter()
-            self.record_button.configure(text="停止录制", bg="#fdeceb", fg="#b3423f")
+            self.record_button.configure(text="停止录制", bg=DANGER_BG, fg=DANGER_FG)
             self._show_record_overlay()
             self._set_status("正在录制鼠标、键盘和滚轮输入")
 
@@ -1648,7 +1814,7 @@ class DesktopClicker:
         self.recording = False
         self.input_recorder.stop()
         self._hide_record_overlay(restore_main=restore_main)
-        self.record_button.configure(text="开始录制", bg="#ffffff", fg="#3a4c55")
+        self.record_button.configure(text="开始录制", bg=CARD_BG, fg=INK_SOFT)
         self.save_task(silent=True)
         self._set_status(f"录制完成，共 {len(self.steps)} 个动作")
 
@@ -1718,14 +1884,22 @@ class DesktopClicker:
             self.stop_run("已停止运行")
             return
         if self.mode_var.get() == "单点连点" and not self.target:
-            messagebox.showinfo("还没有位置", "请先按 F2 捕获鼠标当前位置。")
+            self.show_toast("还没有位置：请先按 F2 捕获鼠标当前位置")
             return
         if self.mode_var.get() != "单点连点" and not self.steps:
-            messagebox.showinfo("还没有动作", "请先捕获位置或录制至少一个动作。")
+            self.show_toast("还没有动作：请先捕获位置或录制至少一个动作")
             return
         self.save_task(silent=True)
         if not self._start_task(self.tasks[self.active_index]):
             self._set_status("当前任务没有可执行动作")
+
+    def start_run(self, index: int) -> None:
+        """右键菜单“开始此任务”：切到指定任务后走主启动流程，复用空任务校验与提示。"""
+        if self.running:
+            self._set_status("任务运行中，停止后才能开始其他任务")
+            return
+        self.select_task(index)
+        self.toggle_run()
 
     def _start_task(self, task: Task) -> bool:
         """从任务快照创建运行计划；手动与定时触发共用，避免读取 UI 临时状态。"""
@@ -1752,7 +1926,7 @@ class DesktopClicker:
         self.run_random_percent = float(task.settings.random_percent)
         self.run_position_mode = task.settings.position_mode
         self.running = True
-        self.run_button.configure(text="停止运行 (F6)", bg="#a84e48")
+        self.run_button.configure(text="停止运行 (F6)", bg=RUNNING_BG)
         self._show_run_overlay()
         self._run_breath_phase = 0
         self._run_breath_tick()
@@ -1868,7 +2042,7 @@ class DesktopClicker:
         self.run_keys_down.clear()
         self.running = False
         self.paused = False
-        self.run_button.configure(text="开始运行 (F6)", bg=GREEN, fg="#ffffff")
+        self.run_button.configure(text="开始运行 (F6)", bg=GREEN, fg=ON_COLOR_FG)
         if hasattr(self, "_run_breath_job") and self._run_breath_job:
             try:
                 self.root.after_cancel(self._run_breath_job)
@@ -1935,7 +2109,7 @@ class DesktopClicker:
             payload = {"schemaVersion": 2, "tasks": [task.to_dict()]}
             Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError as error:
-            messagebox.showerror("导出失败", str(error), parent=self.root)
+            self.show_toast(f"导出失败：{error}", kind="error")
             return
         self.show_toast("已导出")
 
@@ -1953,10 +2127,10 @@ class DesktopClicker:
             items = payload.get("tasks", []) if isinstance(payload, dict) else payload
             imported = [Task.from_dict(item) for item in items if isinstance(item, dict)]
         except (OSError, ValueError, TypeError) as error:
-            messagebox.showerror("导入失败", f"文件无法解析：{error}", parent=self.root)
+            self.show_toast(f"导入失败：文件无法解析（{error}）", kind="error")
             return
         if not imported:
-            messagebox.showinfo("导入", "文件中没有可导入的任务", parent=self.root)
+            self.show_toast("文件中没有可导入的任务")
             return
         self.tasks.extend(imported)
         self._persist_tasks()
@@ -2012,12 +2186,13 @@ class DesktopClicker:
         """首次启用定时计划时一次性询问开机自启；拒绝后记住，不再打扰。"""
         if autostart.is_enabled() or (self.repository.base_dir / ".autostart_declined").exists():
             return
-        enabled = messagebox.askyesno(
+        enabled = self._ask_confirm(
             "开机自启",
             "定时任务在点点运行期间就会生效。\n"
             "开启开机自启后，重启电脑也会自动启动点点、按计划继续执行。\n\n"
             "现在开启开机自启吗？",
-            parent=self.root,
+            confirm_text="开启",
+            cancel_text="暂不",
         )
         if enabled:
             if autostart.set_enabled(True):
@@ -2047,37 +2222,61 @@ class DesktopClicker:
             candidate += dt.timedelta(days=1)
         return candidate.timestamp()
 
-    def _schedule_add_dialog(self, refresh: callable) -> None:
+    def _schedule_add_dialog(self, refresh: callable, schedule: Schedule | None = None) -> None:
+        """新增/编辑定时计划：传入 schedule 时进入编辑模式并回填当前值。"""
         if not self.tasks:
             return
         dialog = tk.Toplevel(self.root)
-        dialog.title("添加定时任务")
+        dialog.title("编辑定时任务" if schedule else "添加定时任务")
         dialog.configure(bg=MAIN_BG)
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
-        body = tk.Frame(dialog, bg=MAIN_BG, padx=S(24), pady=S(20))
+        dialog.focus_force()
+        body = tk.Frame(dialog, bg=MAIN_BG, padx=S(28), pady=S(24))
         body.pack(fill="both", expand=True)
 
-        task_names = [f"{task.name} [{task.id[:8]}]" for task in self.tasks]
-        task_var = tk.StringVar(value=task_names[self.active_index])
+        # 只显示中文任务名，重名时加序号区分，不暴露技术 ID；
+        # 序号名若与既有本名撞车则继续递增，保证显示名与任务一一对应
+        name_totals: dict[str, int] = {}
+        for task in self.tasks:
+            name_totals[task.name] = name_totals.get(task.name, 0) + 1
+        name_seen: dict[str, int] = {}
+        task_names = []
+        task_id_by_name: dict[str, str] = {}
+        for task in self.tasks:
+            name_seen[task.name] = name_seen.get(task.name, 0) + 1
+            display = f"{task.name}（{name_seen[task.name]}）" if name_totals[task.name] > 1 else task.name
+            while display in task_id_by_name:
+                name_seen[task.name] += 1
+                display = f"{task.name}（{name_seen[task.name]}）"
+            task_names.append(display)
+            task_id_by_name[display] = task.id
         kind_labels = {ScheduleKind.ONCE: "一次性", ScheduleKind.DAILY: "每天", ScheduleKind.INTERVAL: "间隔"}
-        kind_var = tk.StringVar(value=kind_labels[ScheduleKind.ONCE])
+        if schedule is not None:
+            task_var = tk.StringVar(value=next((name for name, task_id in task_id_by_name.items() if task_id == schedule.task_id), task_names[0]))
+            kind_var = tk.StringVar(value=kind_labels.get(schedule.kind, kind_labels[ScheduleKind.ONCE]))
+        else:
+            task_var = tk.StringVar(value=task_names[self.active_index])
+            kind_var = tk.StringVar(value=kind_labels[ScheduleKind.ONCE])
         value_var = tk.StringVar()
         error_var = tk.StringVar()
 
-        tk.Label(body, text="任务", bg=MAIN_BG, fg=INK, font=F(12)).grid(row=0, column=0, sticky="w", pady=(0, S(10)))
-        tk.OptionMenu(body, task_var, *task_names).grid(row=0, column=1, sticky="ew", pady=(0, S(10)))
-        tk.Label(body, text="触发方式", bg=MAIN_BG, fg=INK, font=F(12)).grid(row=1, column=0, sticky="w", pady=(0, S(10)))
-        kind_menu = tk.OptionMenu(body, kind_var, *kind_labels.values())
-        kind_menu.grid(row=1, column=1, sticky="ew", pady=(0, S(10)))
-        value_label = tk.Label(body, text="时间", bg=MAIN_BG, fg=INK, font=F(12))
-        value_label.grid(row=2, column=0, sticky="w", pady=(0, S(10)))
-        value_entry = tk.Entry(body, textvariable=value_var, width=26, font=F(12), relief="flat", highlightthickness=1, highlightbackground=FIELD_BORDER, highlightcolor=GREEN)
-        value_entry.grid(row=2, column=1, sticky="ew", pady=(0, S(10)), ipady=S(5))
-        error_label = tk.Label(body, textvariable=error_var, bg=MAIN_BG, fg="#b3423f", font=F(10), justify="left", wraplength=S(300))
-        error_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, S(12)))
-        body.columnconfigure(1, weight=1)
+        field_width = S(300)
+        field_height = S(38)
+
+        tk.Label(body, text="任务", bg=MAIN_BG, fg=INK_SOFT, font=F(12)).grid(row=0, column=0, sticky="w", pady=(0, S(6)))
+        Select(body, task_var, task_names, width=field_width, height=field_height, radius=S(8), border=FIELD_BORDER, font=F(12)).grid(row=1, column=0, sticky="w", pady=(0, S(16)))
+
+        tk.Label(body, text="触发方式", bg=MAIN_BG, fg=INK_SOFT, font=F(12)).grid(row=2, column=0, sticky="w", pady=(0, S(6)))
+        Select(body, kind_var, list(kind_labels.values()), width=field_width, height=field_height, radius=S(8), border=FIELD_BORDER, font=F(12)).grid(row=3, column=0, sticky="w", pady=(0, S(16)))
+
+        value_label = tk.Label(body, text="时间", bg=MAIN_BG, fg=INK_SOFT, font=F(12))
+        value_label.grid(row=4, column=0, sticky="w", pady=(0, S(6)))
+        value_entry = tk.Entry(body, textvariable=value_var, width=30, font=F(12), bg=CARD_BG, fg=INK, relief="flat", highlightthickness=1, highlightbackground=FIELD_BORDER, highlightcolor=GREEN)
+        value_entry.grid(row=5, column=0, sticky="w", pady=(0, S(10)), ipady=S(7))
+        error_label = tk.Label(body, textvariable=error_var, bg=MAIN_BG, fg=DANGER_FG, font=F(11), justify="left", wraplength=field_width)
+        error_label.grid(row=6, column=0, sticky="w", pady=(0, S(8)))
 
         def update_hint(*_args) -> None:
             label = kind_var.get()
@@ -2096,8 +2295,7 @@ class DesktopClicker:
 
         def confirm() -> None:
             try:
-                task_index = task_names.index(task_var.get())
-                task_id = self.tasks[task_index].id
+                task_id = task_id_by_name[task_var.get()]
                 label = kind_var.get()
                 if label == kind_labels[ScheduleKind.ONCE]:
                     run_at = dt.datetime.strptime(value_var.get().strip(), "%Y-%m-%d %H:%M").timestamp()
@@ -2116,23 +2314,35 @@ class DesktopClicker:
                     interval_seconds = minutes * 60
                 if kind == ScheduleKind.ONCE and run_at <= time.time():
                     raise ValueError("一次性任务时间必须晚于当前时间")
-                self.schedules.append(Schedule(task_id=task_id, kind=kind, run_at=run_at, interval_seconds=interval_seconds))
+                if schedule is not None:
+                    schedule.task_id = task_id
+                    schedule.kind = kind
+                    schedule.run_at = run_at
+                    schedule.interval_seconds = interval_seconds
+                    schedule.last_result = ""
+                else:
+                    self.schedules.append(Schedule(task_id=task_id, kind=kind, run_at=run_at, interval_seconds=interval_seconds))
                 self._persist_schedules()
                 self._ensure_tray()
-                first_enabled = sum(1 for item in self.schedules if item.enabled) == 1
                 refresh()
                 dialog.destroy()
-                if first_enabled:
+                if schedule is None and sum(1 for item in self.schedules if item.enabled) == 1:
                     self._maybe_prompt_autostart()
-            except (ValueError, IndexError) as error:
+            except (ValueError, IndexError, KeyError) as error:
                 error_var.set(f"输入无效：{error}")
 
         kind_var.trace_add("write", update_hint)
         update_hint()
+        if schedule is not None:
+            if schedule.kind == ScheduleKind.INTERVAL:
+                value_var.set(str(max(1, schedule.interval_seconds // 60)))
+            elif schedule.run_at:
+                format_text = "%H:%M" if schedule.kind == ScheduleKind.DAILY else "%Y-%m-%d %H:%M"
+                value_var.set(dt.datetime.fromtimestamp(schedule.run_at).strftime(format_text))
         actions = tk.Frame(body, bg=MAIN_BG)
-        actions.grid(row=4, column=0, columnspan=2, sticky="ew")
-        PillButton(actions, "确定", confirm, width=S(84), height=S(34), radius=S(8), bg=GREEN, fg="#ffffff", hover_bg=GREEN_HOVER, font=F(12, "bold")).pack(side="right")
-        PillButton(actions, "取消", cancel, width=S(84), height=S(34), radius=S(8), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12)).pack(side="right", padx=(0, S(8)))
+        actions.grid(row=7, column=0, sticky="ew")
+        PillButton(actions, "确定", confirm, width=S(84), height=S(34), radius=S(8), bg=GREEN, fg=ON_COLOR_FG, hover_bg=GREEN_HOVER, font=F(12, "bold")).pack(side="right")
+        PillButton(actions, "取消", cancel, width=S(84), height=S(34), radius=S(8), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12)).pack(side="right", padx=(0, S(8)))
         dialog.bind("<Return>", lambda _event: confirm())
         dialog.bind("<Escape>", lambda _event: cancel())
         self._center_dialog(dialog)
@@ -2156,12 +2366,20 @@ class DesktopClicker:
 
         tk.Label(dialog, text="定时任务", bg=MAIN_BG, fg=INK, font=F(18, "bold")).pack(anchor="w", padx=S(24), pady=(S(20), S(4)))
         tk.Label(dialog, text="应用保持运行时按计划触发；关闭主窗口会最小化到托盘，任务继续执行。", bg=MAIN_BG, fg=GRAY, font=F(11)).pack(anchor="w", padx=S(24), pady=(0, S(12)))
-        listing = tk.Listbox(dialog, bg="#fbfdfc", fg=INK, selectbackground=PILL_ACTIVE, selectforeground=GREEN_TEXT, relief="flat", highlightthickness=1, highlightbackground=BORDER, font=F(11))
+        listing = tk.Listbox(dialog, bg=LIST_BG, fg=INK, selectbackground=PILL_ACTIVE, selectforeground=GREEN_TEXT, relief="flat", highlightthickness=1, highlightbackground=BORDER, font=F(11))
         listing.pack(fill="both", expand=True, padx=S(24), pady=(0, S(12)))
+        ThinScrollbar(dialog, listing)
         self._schedule_listing = listing
 
         def refresh() -> None:
             self._refresh_schedule_list(listing)
+
+        def edit_selected() -> None:
+            schedule = self._schedule_selected(listing)
+            if schedule is not None:
+                self._schedule_add_dialog(refresh, schedule)
+
+        listing.bind("<Double-Button-1>", lambda _event: edit_selected())
 
         def toggle_selected() -> None:
             schedule = self._schedule_selected(listing)
@@ -2184,15 +2402,16 @@ class DesktopClicker:
 
         actions = tk.Frame(dialog, bg=MAIN_BG)
         actions.pack(fill="x", padx=S(24), pady=(0, S(18)))
-        PillButton(actions, "添加", lambda: self._schedule_add_dialog(refresh), width=S(84), height=S(34), radius=S(8), bg=GREEN, fg="#ffffff", hover_bg=GREEN_HOVER, font=F(12, "bold")).pack(side="left")
-        PillButton(actions, "启用/停用", toggle_selected, width=S(100), height=S(34), radius=S(8), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12)).pack(side="left", padx=S(8))
-        PillButton(actions, "删除", delete_selected, width=S(84), height=S(34), radius=S(8), bg="#fdeceb", fg="#b3423f", border=FIELD_BORDER, hover_bg="#f8d8d5", font=F(12)).pack(side="left")
+        PillButton(actions, "添加", lambda: self._schedule_add_dialog(refresh), width=S(84), height=S(34), radius=S(8), bg=GREEN, fg=ON_COLOR_FG, hover_bg=GREEN_HOVER, font=F(12, "bold")).pack(side="left")
+        PillButton(actions, "启用/停用", toggle_selected, width=S(100), height=S(34), radius=S(8), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12)).pack(side="left", padx=S(8))
+        PillButton(actions, "删除", delete_selected, width=S(84), height=S(34), radius=S(8), bg=DANGER_BG, fg=DANGER_FG, border=FIELD_BORDER, hover_bg=DANGER_HOVER, font=F(12)).pack(side="left")
         def close_dialog() -> None:
             self._schedule_dialog = None
             self._schedule_listing = None
             dialog.destroy()
-        PillButton(actions, "关闭", close_dialog, width=S(84), height=S(34), radius=S(8), bg="#f1f5f3", fg=INK_SOFT, hover_bg="#e7efeb", font=F(12)).pack(side="right")
+        PillButton(actions, "关闭", close_dialog, width=S(84), height=S(34), radius=S(8), bg=SUBTLE_BG, fg=INK_SOFT, hover_bg=SUBTLE_HOVER, font=F(12)).pack(side="right")
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        dialog.bind("<Escape>", lambda _event: close_dialog())
 
         autostart_row = tk.Frame(dialog, bg=MAIN_BG)
         autostart_row.pack(fill="x", padx=S(24), pady=(0, S(18)))
@@ -2216,7 +2435,7 @@ class DesktopClicker:
                 self._set_status("开机自启设置失败，请检查权限")
 
         refresh_autostart_label()
-        PillButton(autostart_row, "开机自启", toggle_autostart, width=S(96), height=S(30), radius=S(8), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg="#f1f9f6", font=F(12, "bold")).pack(side="right")
+        PillButton(autostart_row, "开机自启", toggle_autostart, width=S(96), height=S(30), radius=S(8), bg=CARD_BG, fg=INK, border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12, "bold")).pack(side="right")
         refresh()
 
     def _poll_schedules(self) -> None:
@@ -2230,6 +2449,7 @@ class DesktopClicker:
                 if decisions:
                     self._sync_tray()
                     self._persist_schedules()
+                    self._report_schedule_decisions(decisions)
                     if self._schedule_dialog is not None and self._schedule_dialog.winfo_exists() and self._schedule_listing is not None:
                         self._refresh_schedule_list(self._schedule_listing)
             except Exception as error:
@@ -2245,28 +2465,59 @@ class DesktopClicker:
         started = self._start_task(task)
         if started:
             self._set_status(f"定时任务已触发：{task.name}", "running")
+            if not self.root.winfo_viewable():
+                self._notify("定时任务", f"已触发：{task.name}")
         return started
 
-    def show_toast(self, text: str) -> None:
-        """在窗口中上部短暂浮出一条轻提示，自动消失。"""
-        if getattr(self, "_toast", None) is not None:
-            try:
-                self._toast.destroy()
-            except tk.TclError:
-                pass
+    _SCHEDULE_DECISION_MESSAGES = {
+        "skipped": "上一任务仍在运行，本次触发已跳过",
+        "missed": "错过计划时间，已自动顺延",
+        "rejected": "触发失败，请检查任务步骤",
+        "disabled": "任务不存在，计划已自动停用",
+    }
+
+    def _report_schedule_decisions(self, decisions) -> None:
+        """跳过/错过/失败等调度结果用户不易察觉，主动用气泡或 toast 告知。"""
+        for decision in decisions:
+            message = self._SCHEDULE_DECISION_MESSAGES.get(decision.action)
+            if message is None:
+                continue
+            schedule = next((item for item in self.schedules if item.id == decision.schedule_id), None)
+            name = self._schedule_task_name(schedule) if schedule else "定时计划"
+            self._notify("定时任务", f"{name}：{message}")
+
+    def _notify(self, title: str, message: str) -> None:
+        """面向“用户可能没盯着窗口”的提醒：窗口可见走 toast，收进托盘/不可见走系统气泡。"""
+        if self._tray_hidden or not self.root.winfo_viewable():
+            if self._tray_icon is not None and self._tray_icon.is_alive() and self._tray_icon.notify(title, message):
+                return
+        self.show_toast(f"{title}：{message}")
+
+    def show_toast(self, text: str, *, kind: str = "info", action=None,
+                   action_label: str = "撤销", duration: int = 1800) -> None:
+        """窗口中上部浮出轻提示；kind="error" 红底且停留更久，action 为右侧可点动作（如撤销）。"""
+        self._dismiss_toast(self._toast)
         toast = tk.Toplevel(self.root)
         toast.overrideredirect(True)
-        label = tk.Label(toast, text=text, bg="#31434c", fg="#eef6f2", font=F(12), padx=S(18), pady=S(10))
-        label.pack()
+        toast.attributes("-topmost", True)
+        row = tk.Frame(toast, bg=RUNNING_BG if kind == "error" else TOAST_BG)
+        row.pack()
+        tk.Label(row, text=text, bg=row["bg"], fg=TOAST_FG, font=F(12), padx=S(18), pady=S(10)).pack(side="left")
+        if action is not None:
+            action_button = tk.Label(row, text=action_label, bg=row["bg"], fg=GREEN_BRIGHT, font=F(12, "bold"), padx=(0, S(16)), pady=S(10), cursor="hand2")
+            action_button.pack(side="left")
+            action_button.bind("<Button-1>", lambda _e: (self._dismiss_toast(toast), action()))
         toast.update_idletasks()
-        x = self.root.winfo_x() + (self.root.winfo_width() - toast.winfo_width()) // 2
+        x = max(0, self.root.winfo_x() + (self.root.winfo_width() - toast.winfo_width()) // 2)
         y = self.root.winfo_y() + S(80)
         toast.geometry(f"+{x}+{y}")
         self._toast = toast
-        self.root.after(1800, lambda: self._dismiss_toast(toast))
+        self.root.after(duration if kind == "info" else max(duration, 4000), lambda: self._dismiss_toast(toast))
 
-    def _dismiss_toast(self, toast: tk.Toplevel) -> None:
-        if getattr(self, "_toast", None) is toast:
+    def _dismiss_toast(self, toast: tk.Toplevel | None) -> None:
+        if toast is None:
+            return
+        if self._toast is toast:
             self._toast = None
         try:
             toast.destroy()
@@ -2321,23 +2572,45 @@ class DesktopClicker:
         self._set_status("任务已复制")
 
     def delete_task(self) -> None:
+        """删除改为“先删 + 可撤销”范式：不打断操作流，5 秒内可一键撤销，之后仍可从回收站恢复。"""
         if not self._editing_allowed() or not self.tasks:
             return
         self.save_task(silent=True)
-        task = self.tasks[self.active_index]
-        if not messagebox.askyesno("删除任务", f"将“{task.name}”移入回收站？\n可以稍后恢复。", parent=self.root):
-            return
+        index = self.active_index
+        task = self.tasks.pop(index)
         task.deleted_at = time.time()
         self.trash.append(task)
-        self.tasks.pop(self.active_index)
+        placeholder = None
         if not self.tasks:
-            self.tasks.append(Task())
-        self.active_index = min(self.active_index, len(self.tasks) - 1)
-        self._persist_tasks()
+            placeholder = Task()
+            self.tasks.append(placeholder)
+        self.active_index = min(index, len(self.tasks) - 1)
+        # 先落回收站再写 tasks.json：任一步失败，任务都至少还存在于一份文件中
         self._persist_trash()
+        self._persist_tasks()
         self._render_task_list()
         self._load_active_task()
-        self._set_status("任务已移入回收站")
+
+        def undo() -> None:
+            if self.running:
+                self._set_status("任务运行中，停止后才能撤销删除")
+                return
+            if task not in self.trash:
+                return
+            self.trash.remove(task)
+            task.deleted_at = None
+            if placeholder is not None and len(self.tasks) == 1 and self.tasks[0] is placeholder:
+                self.tasks.clear()  # 撤销时移除删除后自动补的占位任务
+            self.tasks.insert(min(index, len(self.tasks)), task)
+            self.active_index = self.tasks.index(task)
+            # 先写 tasks.json 再落回收站：任一步失败，任务都至少还存在于一份文件中
+            self._persist_tasks()
+            self._persist_trash()
+            self._render_task_list()
+            self._load_active_task()
+            self._set_status("已恢复任务")
+
+        self.show_toast(f"已删除“{task.name}”", action=undo, duration=5000)
 
     def show_trash(self) -> None:
         if self.running:
@@ -2357,7 +2630,7 @@ class DesktopClicker:
         top.focus_force()
         top.configure(bg=MAIN_BG)
         tk.Label(top, text="任务回收站", bg=MAIN_BG, fg=INK, font=F(18, "bold")).pack(anchor="w", padx=S(24), pady=(S(20), S(12)))
-        listing = tk.Listbox(top, bg="#fbfdfc", fg=INK, selectbackground=PILL_ACTIVE, selectforeground=GREEN_TEXT, relief="flat", highlightthickness=1, highlightbackground=BORDER, font=F(12))
+        listing = tk.Listbox(top, bg=LIST_BG, fg=INK, selectbackground=PILL_ACTIVE, selectforeground=GREEN_TEXT, relief="flat", highlightthickness=1, highlightbackground=BORDER, font=F(12))
         listing.pack(fill="both", expand=True, padx=S(24), pady=(0, S(12)))
 
         def refresh() -> None:
@@ -2387,10 +2660,14 @@ class DesktopClicker:
             if index is None:
                 return
             task = self.trash[index]
-            if not messagebox.askyesno("永久删除", f"永久删除“{task.name}”？此操作无法撤销。", parent=top):
+            if not self._ask_confirm("永久删除", f"永久删除“{task.name}”？此操作无法撤销。", danger=True, confirm_text="永久删除"):
                 return
             removed = self.trash.pop(index)
-            self._persist_trash()
+            if not self._persist_trash():
+                # 落盘失败先回滚，模板文件绝不能在回收站记录尚未更新时被删除
+                self.trash.insert(index, removed)
+                refresh()
+                return
             candidates = list(removed.steps)
             if removed.target:
                 candidates.append(removed.target)
@@ -2401,12 +2678,12 @@ class DesktopClicker:
 
         actions = tk.Frame(top, bg=MAIN_BG)
         actions.pack(fill="x", padx=S(24), pady=(0, S(18)))
-        tk.Button(actions, text="恢复", command=restore, bg=GREEN, fg="#ffffff", activebackground=GREEN_HOVER, relief="flat", padx=S(20), pady=S(8), font=F(11, "bold")).pack(side="left")
-        tk.Button(actions, text="永久删除", command=purge, bg="#fdeceb", fg="#b3423f", activebackground="#f8d8d5", relief="flat", padx=S(16), pady=S(8), font=F(11)).pack(side="left", padx=S(8))
+        tk.Button(actions, text="恢复", command=restore, bg=GREEN, fg=ON_COLOR_FG, activebackground=GREEN_HOVER, relief="flat", padx=S(20), pady=S(8), font=F(11, "bold")).pack(side="left")
+        tk.Button(actions, text="永久删除", command=purge, bg=DANGER_BG, fg=DANGER_FG, activebackground=DANGER_HOVER, relief="flat", padx=S(16), pady=S(8), font=F(11)).pack(side="left", padx=S(8))
         def close_trash() -> None:
             self._trash_dialog = None
             top.destroy()
-        tk.Button(actions, text="关闭", command=close_trash, bg="#f1f5f3", fg=INK_SOFT, activebackground="#e7efeb", relief="flat", padx=S(16), pady=S(8), font=F(11)).pack(side="right")
+        tk.Button(actions, text="关闭", command=close_trash, bg=SUBTLE_BG, fg=INK_SOFT, activebackground=SUBTLE_HOVER, relief="flat", padx=S(16), pady=S(8), font=F(11)).pack(side="right")
         top.protocol("WM_DELETE_WINDOW", close_trash)
         refresh()
 
@@ -2471,8 +2748,55 @@ class DesktopClicker:
             self._update_run_overlay(text)
 
     def _set_status(self, text: str, kind: str = "ready") -> None:
-        color = "#a84e48" if kind == "running" else GREEN
+        """更新状态栏；同时记录到历史（悬停状态栏可回看最近消息，避免关键信息一闪而过）。"""
+        self._status_history.append((time.time(), text, kind))
+        del self._status_history[:-30]
+        color = RUNNING_BG if kind == "running" else GREEN
         self.status_label.configure(text=f"●  {text}", fg=color)
+
+    def _schedule_status_history(self) -> None:
+        """悬停 500ms 才弹出，避免快速划过状态栏时闪烁；移开会取消尚未触发的弹出。"""
+        self._cancel_status_history_show()
+        self._history_show_job = self.root.after(500, self._show_status_history)
+
+    def _cancel_status_history_show(self) -> None:
+        job = self._history_show_job
+        if job is not None:
+            self._history_show_job = None
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _show_status_history(self) -> None:
+        self._cancel_status_history_show()
+        if self._history_bubble is not None or not self._status_history:
+            return
+        bubble = tk.Toplevel(self.root)
+        bubble.overrideredirect(True)
+        bubble.attributes("-topmost", True)
+        tk.Frame(bubble, bg=TOAST_BG, padx=S(4), pady=S(6)).pack()
+        for stamp, text, kind in self._status_history[-8:][::-1]:
+            row = tk.Frame(bubble, bg=TOAST_BG)
+            row.pack(fill="x", padx=S(10))
+            tk.Label(row, text=time.strftime("%H:%M:%S", time.localtime(stamp)), bg=TOAST_BG, fg=ICON_MUTED, font=M(10)).pack(side="left")
+            tk.Label(row, text=text, bg=TOAST_BG, fg=GREEN_BRIGHT if kind == "running" else TOAST_FG, font=F(11)).pack(side="left", padx=(S(10), 0))
+        bubble.update_idletasks()
+        width, height = bubble.winfo_width(), bubble.winfo_height()
+        x = max(S(8), self.status_label.winfo_rootx() + self.status_label.winfo_width() // 2 - width // 2)
+        y = self.status_label.winfo_rooty() - height - S(8)
+        bubble.geometry(f"+{x}+{max(S(8), y)}")
+        self._history_bubble = bubble
+
+    def _hide_status_history(self) -> None:
+        self._cancel_status_history_show()
+        bubble = getattr(self, "_history_bubble", None)
+        if bubble is not None:
+            self._history_bubble = None
+            try:
+                bubble.destroy()
+            except tk.TclError:
+                pass
 
     def _overlay_geometry(self, width: int, height: int) -> str:
         screen_width = self.root.winfo_screenwidth()
@@ -2484,22 +2808,22 @@ class DesktopClicker:
         w, h = S(540), S(72)
         overlay = tk.Toplevel(self.root)
         overlay.overrideredirect(True)
-        overlay.configure(bg="#181d1a")
+        overlay.configure(bg=OVERLAY_BG)
         overlay.attributes("-topmost", True)
         overlay.geometry(self._overlay_geometry(w, h))
         overlay.minsize(w, h)
         overlay.maxsize(w, h)
-        frame = tk.Frame(overlay, bg="#181d1a", padx=S(18), pady=S(12))
+        frame = tk.Frame(overlay, bg=OVERLAY_BG, padx=S(18), pady=S(12))
         frame.pack(fill="both", expand=True)
-        tk.Label(frame, text="●", bg="#181d1a", fg="#ef8c82", font=F(20, "bold")).pack(side="left", padx=(0, S(12)))
-        copy = tk.Frame(frame, bg="#181d1a")
+        tk.Label(frame, text="●", bg=OVERLAY_BG, fg=OVERLAY_ACCENT, font=F(20, "bold")).pack(side="left", padx=(0, S(12)))
+        copy = tk.Frame(frame, bg=OVERLAY_BG)
         copy.pack(side="left", fill="y", expand=True)
-        tk.Label(copy, text="点点正在执行", bg="#181d1a", fg="#ffffff", font=F(13, "bold")).pack(anchor="w")
-        self.run_overlay_status = tk.Label(copy, text="准备中…", bg="#181d1a", fg="#b8c3bc", font=F(12))
+        tk.Label(copy, text="点点正在执行", bg=OVERLAY_BG, fg=ON_COLOR_FG, font=F(13, "bold")).pack(anchor="w")
+        self.run_overlay_status = tk.Label(copy, text="准备中…", bg=OVERLAY_BG, fg=OVERLAY_INK_SOFT, font=F(12))
         self.run_overlay_status.pack(anchor="w", pady=(S(3), 0))
-        self.run_overlay_pause = tk.Button(frame, text="暂停  F7", command=self.toggle_pause, bg="#303a33", fg="#ffffff", activebackground="#414d45", activeforeground="#ffffff", relief="flat", bd=0, padx=S(14), pady=S(7), font=F(12, "bold"))
+        self.run_overlay_pause = tk.Button(frame, text="暂停  F7", command=self.toggle_pause, bg=OVERLAY_BUTTON, fg=ON_COLOR_FG, activebackground=OVERLAY_BUTTON_HOVER, activeforeground=ON_COLOR_FG, relief="flat", bd=0, padx=S(14), pady=S(7), font=F(12, "bold"))
         self.run_overlay_pause.pack(side="left", padx=(S(12), S(8)))
-        tk.Button(frame, text="停止  Esc", command=lambda: self.stop_run("已停止运行"), bg="#a84e48", fg="#ffffff", activebackground="#8d3f3a", activeforeground="#ffffff", relief="flat", bd=0, padx=S(14), pady=S(7), font=F(12, "bold")).pack(side="left")
+        tk.Button(frame, text="停止  Esc", command=lambda: self.stop_run("已停止运行"), bg=RUNNING_BG, fg=ON_COLOR_FG, activebackground=DANGER_DEEP, activeforeground=ON_COLOR_FG, relief="flat", bd=0, padx=S(14), pady=S(7), font=F(12, "bold")).pack(side="left")
         overlay.update_idletasks()
         self.run_overlay = overlay
         self.run_overlay_handle = int(USER32.GetAncestor(overlay.winfo_id(), 2) or overlay.winfo_id())
@@ -2510,18 +2834,18 @@ class DesktopClicker:
         self._hide_record_overlay(restore_main=False)
         overlay = tk.Toplevel(self.root)
         overlay.overrideredirect(True)
-        overlay.configure(bg="#181d1a")
+        overlay.configure(bg=OVERLAY_BG)
         overlay.attributes("-topmost", True)
         overlay.geometry(self._overlay_geometry(S(510), S(70)))
         overlay.pack_propagate(False)
-        frame = tk.Frame(overlay, bg="#181d1a", padx=S(15), pady=S(10))
+        frame = tk.Frame(overlay, bg=OVERLAY_BG, padx=S(15), pady=S(10))
         frame.pack(fill="both", expand=True)
-        tk.Label(frame, text="●", bg="#181d1a", fg="#ef8c82", font=F(20, "bold")).pack(side="left", padx=(0, S(10)))
-        copy_frame = tk.Frame(frame, bg="#181d1a")
+        tk.Label(frame, text="●", bg=OVERLAY_BG, fg=OVERLAY_ACCENT, font=F(20, "bold")).pack(side="left", padx=(0, S(10)))
+        copy_frame = tk.Frame(frame, bg=OVERLAY_BG)
         copy_frame.pack(side="left", fill="y", expand=True)
-        tk.Label(copy_frame, text="正在录制桌面输入", bg="#181d1a", fg="#ffffff", font=F(13, "bold")).pack(anchor="w")
-        tk.Label(copy_frame, text="记录点击、滚轮和键盘 · Esc 停止", bg="#181d1a", fg="#b8c3bc", font=F(12)).pack(anchor="w", pady=(S(3), 0))
-        tk.Button(frame, text="停止录制  Esc", command=self._stop_recording, bg="#a84e48", fg="#ffffff", activebackground="#8d3f3a", activeforeground="#ffffff", relief="flat", bd=0, padx=S(13), pady=S(7), font=F(12, "bold")).pack(side="right")
+        tk.Label(copy_frame, text="正在录制桌面输入", bg=OVERLAY_BG, fg=ON_COLOR_FG, font=F(13, "bold")).pack(anchor="w")
+        tk.Label(copy_frame, text="记录点击、滚轮和键盘 · Esc 停止", bg=OVERLAY_BG, fg=OVERLAY_INK_SOFT, font=F(12)).pack(anchor="w", pady=(S(3), 0))
+        tk.Button(frame, text="停止录制  Esc", command=self._stop_recording, bg=RUNNING_BG, fg=ON_COLOR_FG, activebackground=DANGER_DEEP, activeforeground=ON_COLOR_FG, relief="flat", bd=0, padx=S(13), pady=S(7), font=F(12, "bold")).pack(side="right")
         overlay.update_idletasks()
         self.record_overlay = overlay
         self.record_overlay_handle = int(USER32.GetAncestor(overlay.winfo_id(), 2) or overlay.winfo_id())
@@ -2539,9 +2863,6 @@ class DesktopClicker:
     def _update_run_overlay(self, text: str) -> None:
         if self.run_overlay_status:
             self.run_overlay_status.configure(text=text)
-
-    _RUN_BREATH_BASE = "#a84e48"
-    _RUN_BREATH_PEAK = "#c85a50"
 
     def _run_breath_tick(self) -> None:
         """运行按钮呼吸动画：在深红和亮红之间渐变，强化运行状态。"""
@@ -2630,14 +2951,15 @@ class DesktopClicker:
             return
         if not self._exit_requested and not self.closing and any(schedule.enabled for schedule in self.schedules):
             # 托盘不可用时的兜底：让用户知道退出会停掉定时任务
-            confirmed = messagebox.askyesno(
+            confirmed = self._ask_confirm(
                 "退出点点",
                 "当前有启用中的定时任务。点点关闭后不会在后台执行，确定退出吗？",
-                parent=self.root,
+                confirm_text="退出",
             )
             if not confirmed:
                 return
         self.closing = True
+        self._persist_window_placement()
         self.capture_armed = False
         self._hide_capture_overlay(restore_main=False)
         if self.running:
@@ -2673,9 +2995,8 @@ class DesktopClicker:
 def main() -> None:
     enable_per_monitor_dpi_awareness()
     # 单实例守护：托盘常驻后双开会导致两份定时计划同时注入输入。
-    # 句柄按约定保持存活到进程退出（局部变量随 main() 存活整个 mainloop）
-    mutex_handle = acquire_mutex("Diandian.SingleInstance")
-    if mutex_handle is None:
+    # 句柄由 winapi 记录并保持存活到进程退出（主题重启时经 release_mutex 提前释放）
+    if acquire_mutex("Diandian.SingleInstance") is None:
         activate_window_by_title("点点")
         return
     root = tk.Tk()
