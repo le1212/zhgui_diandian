@@ -11,7 +11,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Version](https://img.shields.io/badge/Version-1.0.0-orange)
+![Version](https://img.shields.io/badge/Version-1.1.0-orange)
 ![Build](https://img.shields.io/badge/Build-PyInstaller%20%2B%20InnoSetup-blueviolet)
 
 </div>
@@ -45,6 +45,13 @@
 - 自动保存：任务实时保存到本地
 - 导出 / 导入：任务以 JSON 格式导出 / 导入，便于分享和备份
 - 数据持久化：任务、截图模板、步骤截图均持久化存储
+
+### 自动更新
+- 启动后台检查更新：24 小时节流，不阻塞启动，网络异常静默忽略
+- 发现新版本在主窗口展示横幅，一键下载安装包并校验 SHA-256，通过后退出点点、静默安装并自动重启新版
+- 可跳过指定版本；「重大缺陷修复」版本绕过节流，每次启动强提醒
+- 绿色版 / 源码运行自动降级为「前往下载页」，不做静默安装
+- 手动入口：侧栏版本号「v1.1.0 · 检查更新」、托盘菜单「检查更新」
 
 ### 运行控制
 - 全局快捷键：`F2` 捕获坐标，`F6` 运行 / 停止，`F7` 暂停 / 继续，`Esc` 紧急停止
@@ -145,10 +152,13 @@ liandianqi/
 ├── autostart.py             # 开机自启（当前用户注册表 Run 键）
 ├── models.py                # 数据模型（Step / Task / Schedule / TaskSettings）
 ├── task_repository.py       # 任务存储（JSON 持久化 + 备份 + 迁移）
+├── updater.py               # 应用自更新（清单获取 / 版本比较 / 下载校验 / 静默安装）
+├── version.py               # 版本号唯一来源（安装包版本由 setup.iss 构建时读取）
 ├── image_locator.py         # 图像模板匹配
 ├── raw_input.py             # Raw Input 录制器
 ├── Diandian.spec            # PyInstaller 配置
-├── setup.iss                # Inno Setup 安装脚本
+├── setup.iss                # Inno Setup 安装脚本（版本号自动读取 version.py）
+├── release.ps1              # 一键发版（测试 + 构建 + 生成更新清单）
 ├── AGENTS.md                # 项目协作规范
 └── README.md                # 项目说明
 ```
@@ -164,10 +174,24 @@ python -m PyInstaller Diandian.spec --noconfirm
 
 ### 安装版
 ```powershell
-# 需先安装 Inno Setup 6
+# 需先安装 Inno Setup 6；安装包版本号自动取自 version.py 首行
 & "C:\Users\<用户名>\AppData\Local\Programs\Inno Setup 6\ISCC.exe" setup.iss
-# 输出：安装向导安装包
+# 输出：installer/Diandian-Setup-<版本号>.exe
 ```
+
+### 一键发版
+```powershell
+.\release.ps1 -Notes "本次更新说明"
+# 自动跑测试 → 构建 → 算 SHA-256 → 生成 deploy/updates/latest.json → 打印上传清单
+```
+可选参数：`-MinVersion "1.2.0"` 设置强制更新门槛；`-SkipBuild` 跳过构建只重新生成清单；`-DryRun` 预演不写文件。
+
+### 发布新版本（自动更新链路）
+1. 修改 `version.py` 首行的 `APP_VERSION`（唯一需要改版本号的地方）；
+2. 运行 `.\release.ps1 -Notes "..."`：自动跑测试、构建安装版与绿色版、生成 `deploy/updates/latest.json`，并把绿色版按版本号另存到 `dist/`；
+3. 按脚本提示上传：安装包 `Diandian-Setup-<版本>.exe` 上传到下载专用域 `install.zhigui.icu` 的 `diandian/` 目录（仅 DNS 直连源站，不走 CDN，更新器拉取不受防护拦截）；deploy/ 目录发布到官网；绿色版 `dist/Diandian-<版本>.exe` 发到 GitHub Releases。落地页下载地址由页面脚本自动读取 `updates/latest.json`，发版无需修改页面；
+4. 老用户启动点点后即会收到更新横幅。`sha256` 留空时客户端自动降级为「前往下载页」，不执行静默安装；
+5. 本地联调可设置环境变量 `DIANDIAN_UPDATE_URL` 指向测试清单地址（仅建议 localhost HTTP）。
 
 ### 图标更换
 替换 `assets/app_icon.png`（建议 256×256 以上 PNG），重新生成 ico 后打包即可。
@@ -184,6 +208,7 @@ Diandian/
 ├── templates/               # 图像定位模板
 ├── thumbs/                  # 步骤截图预览
 ├── trash.json               # 回收站
+├── update-state.json        # 自动更新状态（上次检查时间、跳过的版本、强制更新待办）
 ├── ui-state.json            # UI 状态（窗口几何、主题偏好）
 └── .onboarded               # 新手引导完成标记
 ```

@@ -19,6 +19,7 @@ import threading
 import time
 import tkinter as tk
 import uuid
+import webbrowser
 from collections import OrderedDict
 from pathlib import Path
 from tkinter import filedialog
@@ -27,6 +28,7 @@ from PIL import Image, ImageDraw, ImageGrab, ImageTk
 
 from image_locator import locate_template, virtual_screen_origin
 import autostart
+import updater
 from models import Schedule, ScheduleKind, Step, Task
 from raw_input import RawInputRecorder, key_name
 from run_engine import RunEngine, RunPlan
@@ -34,6 +36,7 @@ from scheduler import Scheduler
 from task_repository import TaskRepository
 from theme import THEME_NAME
 from tray_icon import TrayIcon
+from version import APP_VERSION
 from widgets import (
     BORDER, BORDER_SOFT, CARD_BG, CheckBox, ContextMenu, DANGER_BG,
     DANGER_DEEP, DANGER_FG, DANGER_HOVER, DANGER_SOFT_BG, FIELD_BORDER, F,
@@ -154,6 +157,11 @@ class DesktopClicker:
         self._tray_hidden = False
         self._exit_requested = False
         self.closing = False
+        self.update_info: updater.UpdateInfo | None = None
+        self.update_banner: tk.Widget | None = None
+        self._update_dialog: tk.Toplevel | None = None
+        self._update_checking = False
+        self._update_busy = False
         self.hotkey_state = {
             key: bool(USER32.GetAsyncKeyState(key) & 0x8000)
             for key in (VK_F2, VK_F6, VK_F7, VK_ESCAPE)
@@ -170,6 +178,7 @@ class DesktopClicker:
         self.root.after(1000, self._poll_schedules)
         self.root.after(500, self._refresh_cursor_readout)
         self.root.after(400, self._maybe_show_onboarding)
+        self.root.after(4000, self._startup_update_check)
 
     # ------------------------------------------------------------------
     # 界面搭建
@@ -179,10 +188,12 @@ class DesktopClicker:
         self._build_sidebar()
         main = tk.Frame(self.root, bg=MAIN_BG)
         main.pack(side="left", fill="both", expand=True)
+        self.main_area = main
         self._build_header(main)
         self._build_toolbar(main)
         body = tk.Frame(main, bg=MAIN_BG)
         body.pack(fill="both", expand=True, padx=S(36), pady=(S(22), 0))
+        self.body_area = body
         self._build_workspace(body)
         self._build_settings(body)
         self._build_statusbar(main)
@@ -238,6 +249,9 @@ class DesktopClicker:
         tk.Label(brand_text, text="点点 · 桌面连点器", bg=SIDEBAR_BG, fg=INK, font=F(17, "bold")).pack(anchor="w")
         tk.Label(brand_text, text="让重复操作变得更简单", bg=SIDEBAR_BG, fg=GRAY, font=F(11)).pack(anchor="w", pady=(S(3), 0))
         tk.Label(brand_text, text="By Zhgui", bg=SIDEBAR_BG, fg=ICON_MUTED, font=F(10)).pack(anchor="w", pady=(S(2), 0))
+        version_label = tk.Label(brand_text, text=f"v{APP_VERSION} · 检查更新", bg=SIDEBAR_BG, fg=ICON_MUTED, font=F(10), cursor="hand2")
+        version_label.pack(anchor="w", pady=(S(2), 0))
+        version_label.bind("<Button-1>", lambda _event: self._check_updates_manually())
         self.tasks_item = PillButton(sidebar, "我的任务", self._toggle_task_list, width=S(272), height=S(44), radius=S(10), bg=SIDEBAR_BG, hover_bg=ROW_HOVER, fg=INK, icon="tasks", icon_color=INK_SOFT, font=F(13), align="left", trailing="chevron-up")
         self.tasks_item.pack(padx=S(18), pady=(S(30), S(4)))
         # 底栏固定在侧边栏底部，任务再多也不会把它顶出可视区
@@ -308,8 +322,11 @@ class DesktopClicker:
         # 先释放单实例互斥体再拉起新进程：旧进程退出与新进程启动的先后不可控，
         # 不释放会让新实例误判双开而直接退出
         release_mutex()
+        # PyInstaller onefile 用 _MEIPASS2/_PYI* 做父子进程握手，重启进程一旦继承
+        # 就会跳过解包、复用旧进程正在销毁的临时目录，导致 import 崩溃，必须剥离
+        restart_env = {key: value for key, value in os.environ.items() if not key.startswith(("_MEI", "_PYI"))}
         try:
-            subprocess.Popen(command)
+            subprocess.Popen(command, env=restart_env)
         except OSError:
             self._set_status("自动重启失败，请手动重启点点")
             return
@@ -2499,7 +2516,7 @@ class DesktopClicker:
         self._dismiss_toast(self._toast)
         toast = tk.Toplevel(self.root)
         toast.overrideredirect(True)
-        toast.attributes("-topmost", True)
+        # 不置顶：toast 只属于点点，切到别的应用时跟随主窗口层级，不再压住所有页面
         row = tk.Frame(toast, bg=RUNNING_BG if kind == "error" else TOAST_BG)
         row.pack()
         tk.Label(row, text=text, bg=row["bg"], fg=TOAST_FG, font=F(12), padx=S(18), pady=S(10)).pack(side="left")
@@ -2508,8 +2525,17 @@ class DesktopClicker:
             action_button.pack(side="left")
             action_button.bind("<Button-1>", lambda _e: (self._dismiss_toast(toast), action()))
         toast.update_idletasks()
-        x = max(0, self.root.winfo_x() + (self.root.winfo_width() - toast.winfo_width()) // 2)
-        y = self.root.winfo_y() + S(80)
+        # 定位在主窗口内容区上方居中；窗口被拖出屏幕或多屏负坐标时，
+        # 按窗口所在显示器的工作区收回，不能简单 max(0,…)（会把 toast 拽到主屏左上角）
+        toast_width = toast.winfo_width()
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        x = root_x + max(0, (self.root.winfo_width() - toast_width) // 2)
+        y = root_y + S(80)
+        work_area = monitor_workarea_at(root_x + self.root.winfo_width() // 2, root_y)
+        if work_area is not None:
+            work_x, work_y, work_width, work_height = work_area
+            x = min(max(x, work_x), max(work_x, work_x + work_width - toast_width))
+            y = min(max(y, work_y), max(work_y, work_y + work_height - toast.winfo_height()))
         toast.geometry(f"+{x}+{y}")
         self._toast = toast
         self.root.after(duration if kind == "info" else max(duration, 4000), lambda: self._dismiss_toast(toast))
@@ -2524,7 +2550,309 @@ class DesktopClicker:
         except tk.TclError:
             pass
 
+    # ------------------------------------------------------------------
+    # 自动更新
+    # ------------------------------------------------------------------
 
+    def _startup_update_check(self) -> None:
+        """启动数秒后后台检查更新；24 小时节流，强制更新待办除外，绝不阻塞启动。"""
+        if self.closing:
+            return
+        state = self.repository.load_update_state()
+        required = str(state.get("required_version") or "")
+        forced = bool(required) and updater.is_newer_version(required, APP_VERSION)
+        try:
+            last_check = float(state.get("last_check") or 0.0)
+        except (TypeError, ValueError):
+            last_check = 0.0
+        if not forced and not updater.should_check(last_check, time.time()):
+            return
+        self._spawn_update_check(manual=False)
+
+    def _check_updates_manually(self) -> None:
+        if self._update_checking or self._update_busy:
+            return
+        self._set_status("正在检查更新…")
+        self._spawn_update_check(manual=True)
+
+    def _spawn_update_check(self, manual: bool) -> None:
+        self._update_checking = True
+
+        def worker() -> None:
+            try:
+                info = updater.fetch_update()
+            except updater.UpdateError as error:
+                self.ui_events.put((self._on_update_checked, (None, str(error), manual)))
+            except Exception as error:  # 兜底：任何异常都必须回投，否则检查标志永久卡死
+                self.ui_events.put((self._on_update_checked, (None, f"{type(error).__name__}: {error}", manual)))
+            else:
+                self.ui_events.put((self._on_update_checked, (info, None, manual)))
+
+        threading.Thread(target=worker, name="update-check", daemon=True).start()
+
+    def _on_update_checked(self, info: updater.UpdateInfo | None, error: str | None, manual: bool) -> None:
+        self._update_checking = False
+        if self.closing:
+            return
+        state = self.repository.load_update_state()
+        state["last_check"] = time.time()
+        if error is not None:
+            self._save_update_state(state)
+            if manual:
+                self.show_toast(f"检查更新失败：{error}", kind="error")
+                self._set_status("检查更新失败")
+            return
+        if info is None or not updater.is_newer_version(info.version, APP_VERSION):
+            state.pop("required_version", None)
+            self._save_update_state(state)
+            if manual:
+                self.show_toast(f"当前已是最新版本 v{APP_VERSION}")
+                self._set_status("当前已是最新版本")
+            return
+        self.update_info = info
+        if updater.is_update_required(info):
+            # 重要缺陷修复：记录待办版本，绕过 24 小时节流，每次启动都提醒
+            state["required_version"] = info.min_version
+            self._save_update_state(state)
+            self._show_force_update_dialog(info)
+            return
+        if state.pop("required_version", None) is not None:
+            self._save_update_state(state)
+        if info.version == state.get("skipped_version"):
+            return
+        self._show_update_banner(info)
+
+    def _save_update_state(self, state: dict) -> None:
+        try:
+            self.repository.save_update_state(state)
+        except OSError:
+            pass
+
+    def _update_action_label(self) -> str:
+        """安装版按钮为「立即更新」，绿色版/源码运行降级为「前往下载」。"""
+        return "前往下载" if not updater.is_installed_build() else "立即更新"
+
+    def _show_update_banner(self, info: updater.UpdateInfo) -> None:
+        """主窗口内容区顶部插入更新横幅：与任务设置卡同语言的圆角卡片。"""
+        self._dismiss_update_banner()
+        notes = info.notes.splitlines()[0] if info.notes else "修复已知问题，优化使用体验"
+        if len(notes) > 48:
+            notes = notes[:47] + "…"
+        card = RoundedCard(self.main_area, height=S(84), radius=S(16))
+        card.pack(fill="x", padx=S(36), pady=(S(14), 0), before=self.body_area)
+        row = card.body
+        badge = tk.Canvas(row, width=S(38), height=S(38), bg=CARD_BG, highlightthickness=0)
+        badge.pack(side="left", padx=(S(18), S(12)), pady=S(12))
+        rounded_rect(badge, 0, 0, S(38), S(38), S(12), fill=SUBTLE_BG, outline="")
+        paint_icon(badge, "download", S(19), S(19), S(20), GREEN, SUBTLE_BG)
+        text = tk.Frame(row, bg=CARD_BG)
+        text.pack(side="left")
+        tk.Label(text, text=f"发现新版本 v{info.version}", bg=CARD_BG, fg=INK, font=F(13, "bold")).pack(anchor="w")
+        tk.Label(text, text=notes, bg=CARD_BG, fg=GRAY, font=F(11)).pack(anchor="w", pady=(S(1), 0))
+        # 主按钮先 pack 才能位于最右，与确认对话框的按钮次序一致
+        PillButton(
+            row, self._update_action_label(), self._install_from_banner,
+            width=S(92), height=S(34), radius=S(9), bg=GREEN, fg=ON_COLOR_FG,
+            hover_bg=GREEN_HOVER, font=F(12, "bold"),
+        ).pack(side="right")
+        PillButton(
+            row, "跳过此版本", self._skip_update_version,
+            width=S(92), height=S(34), radius=S(9), bg=CARD_BG, fg=INK_SOFT,
+            border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12),
+        ).pack(side="right", padx=(0, S(16)))
+        self.update_banner = card
+
+    def _dismiss_update_banner(self) -> None:
+        if self.update_banner is None:
+            return
+        try:
+            self.update_banner.destroy()
+        except tk.TclError:
+            pass
+        self.update_banner = None
+
+    def _skip_update_version(self) -> None:
+        info = self.update_info
+        if info is not None:
+            state = self.repository.load_update_state()
+            state["skipped_version"] = info.version
+            self._save_update_state(state)
+        self._dismiss_update_banner()
+        self.show_toast("已跳过该版本，后续版本发布时会再次提醒")
+
+    def _install_from_banner(self) -> None:
+        info = self.update_info
+        if info is None or self._update_busy or self._update_checking:
+            return
+        if not info.installer_url or not updater.is_installed_build():
+            # 绿色版/源码运行，或清单未提供可校验的安装包：统一引导到下载页
+            webbrowser.open(info.page_url)
+            self.show_toast("已在浏览器打开下载页面")
+            return
+        self._begin_update_download(info)
+
+    def _begin_update_download(self, info: updater.UpdateInfo) -> None:
+        """弹模态下载对话框，后台线程下载安装包，进度经 ui_events 回主线程。"""
+        self._update_busy = True
+        cancel = threading.Event()
+        dialog = tk.Toplevel(self.root)
+        dialog.title("正在更新点点")
+        dialog.configure(bg=MAIN_BG)
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.protocol("WM_DELETE_WINDOW", cancel.set)
+        self._update_dialog = dialog
+        body = tk.Frame(dialog, bg=MAIN_BG, padx=S(28), pady=S(22))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=f"正在下载点点 v{info.version}", bg=MAIN_BG, fg=INK, font=F(15, "bold")).pack(anchor="w")
+        bar_width, bar_height = S(320), S(8)
+        bar = tk.Canvas(body, width=bar_width, height=bar_height, bg=MAIN_BG, highlightthickness=0)
+        bar.pack(anchor="w", pady=(S(16), S(8)))
+        status = tk.Label(body, text="准备下载…", bg=MAIN_BG, fg=GRAY, font=F(11))
+        status.pack(anchor="w")
+
+        def render_progress(received: int, total: int | None) -> None:
+            if self._update_dialog is not dialog:
+                return
+            ratio = min(1.0, received / total) if total else 0.0
+            bar.delete("all")
+            rounded_rect(bar, 0, 0, bar_width, bar_height, bar_height / 2, fill=FIELD_BORDER, outline="")
+            if ratio > 0:
+                rounded_rect(bar, 0, 0, max(bar_height, bar_width * ratio), bar_height, bar_height / 2, fill=GREEN, outline="")
+            if total:
+                status.configure(text=f"已下载 {received / 1048576:.1f} / {total / 1048576:.1f} MB（{round(ratio * 100)}%）")
+            else:
+                status.configure(text=f"已下载 {received / 1048576:.1f} MB")
+
+        def request_cancel() -> None:
+            cancel.set()
+
+        PillButton(
+            body, "取消", request_cancel,
+            width=S(88), height=S(34), radius=S(8), bg=CARD_BG, fg=INK,
+            border=FIELD_BORDER, hover_bg=NEUTRAL_HOVER, font=F(12),
+        ).pack(anchor="e", pady=(S(14), 0))
+
+        def worker() -> None:
+            last_report = time.monotonic()
+
+            def progress(received: int, total: int | None) -> None:
+                nonlocal last_report
+                now = time.monotonic()
+                if now - last_report < 0.1:
+                    return
+                last_report = now
+                self.ui_events.put((render_progress, (received, total)))
+
+            try:
+                installer_path = updater.download_installer(info, progress=progress, cancel=cancel)
+            except updater.UpdateCancelled:
+                self.ui_events.put((self._on_update_aborted, ()))
+            except updater.UpdateError as error:
+                self.ui_events.put((self._on_update_failed, (str(error),)))
+            except Exception as error:  # 兜底：任何异常都必须回投，否则下载对话框会永久卡死
+                self.ui_events.put((self._on_update_failed, (f"{type(error).__name__}: {error}",)))
+            else:
+                self.ui_events.put((render_progress, (1, 1)))
+                self.ui_events.put((self._on_update_downloaded, (installer_path,)))
+
+        threading.Thread(target=worker, name="update-download", daemon=True).start()
+        self._center_dialog(dialog)
+
+    def _on_update_downloaded(self, installer_path: Path) -> None:
+        self._close_update_dialog()
+        version = self.update_info.version if self.update_info else ""
+        confirmed = self._ask_confirm(
+            "准备安装更新",
+            f"v{version} 安装包已下载并通过完整性校验。\n\n点击「立即安装」后点点会退出，安装完成后将自动启动新版。",
+            confirm_text="立即安装",
+            cancel_text="稍后再说",
+        )
+        if not confirmed:
+            self.show_toast("已取消安装，可随时点击「立即更新」重试")
+            return
+        self._install_and_exit(installer_path)
+
+    def _install_and_exit(self, installer_path: Path) -> None:
+        """校验通过的安装包就位后：拉起静默安装器，退出点点交由安装器接管。"""
+        info = self.update_info
+        if info is not None and info.sha256 is not None and not updater.verify_installer(installer_path, info.sha256):
+            # 下载校验与实际执行之间存在窗口期，执行前必须重算哈希
+            updater.discard_installer(info)
+            self.show_toast("安装包校验失败，已放弃安装", kind="error")
+            return
+        try:
+            updater.launch_installer(installer_path)
+        except OSError as error:
+            self.show_toast(f"启动安装程序失败：{error}", kind="error")
+            return
+        # 与主题重启同理：先释放互斥体，避免安装器拉起的新版误判双开而退出
+        release_mutex()
+        self._exit_requested = True
+        self.close()
+
+    def _on_update_failed(self, message: str) -> None:
+        self._close_update_dialog()
+        self.show_toast(f"更新失败：{message}", kind="error")
+        self._set_status(f"更新失败：{message}")
+
+    def _on_update_aborted(self) -> None:
+        self._close_update_dialog()
+        self.show_toast("已取消更新")
+
+    def _close_update_dialog(self) -> None:
+        dialog, self._update_dialog = self._update_dialog, None
+        if dialog is not None:
+            try:
+                dialog.destroy()
+            except tk.TclError:
+                pass
+        self._update_busy = False
+
+    def _show_force_update_dialog(self, info: updater.UpdateInfo) -> None:
+        """重要缺陷修复的强制提醒：安装版主按钮为「立即更新」，红色「退出点点」为真实退出；绿色版引导前往下载页。"""
+        installed = updater.is_installed_build()
+        top = tk.Toplevel(self.root)
+        top.title("发现重要更新")
+        top.configure(bg=MAIN_BG)
+        top.resizable(False, False)
+        top.transient(self.root)
+        top.grab_set()
+        body = tk.Frame(top, bg=MAIN_BG, padx=S(28), pady=S(24))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=f"需要更新到 v{info.version}", bg=MAIN_BG, fg=INK, font=F(16, "bold")).pack(anchor="w")
+        for line in (info.notes or "该版本修复了重要问题，建议尽快更新").splitlines():
+            tk.Label(body, text=line or " ", bg=MAIN_BG, fg=INK_SOFT, font=F(12), wraplength=S(380), justify="left").pack(anchor="w", pady=(S(4), 0))
+        btn_row = tk.Frame(body, bg=MAIN_BG)
+        btn_row.pack(fill="x", pady=(S(16), 0))
+
+        def main_action() -> None:
+            top.destroy()
+            self._install_from_banner()
+
+        def exit_application() -> None:
+            top.destroy()
+            # 文案承诺退出应用，必须走真实退出（先置标志避免被拦成最小化到托盘）
+            self._exit_requested = True
+            self.close()
+
+        PillButton(
+            btn_row, self._update_action_label(), main_action,
+            width=S(96), height=S(36), radius=S(8), bg=GREEN, fg=ON_COLOR_FG,
+            hover_bg=GREEN_HOVER, font=F(13, "bold"),
+        ).pack(side="right")
+        PillButton(
+            btn_row, "退出点点" if installed else "稍后再说",
+            exit_application if installed else top.destroy,
+            width=S(96), height=S(36), radius=S(8), bg=CARD_BG,
+            fg=DANGER_FG if installed else INK, border=FIELD_BORDER,
+            hover_bg=DANGER_BG if installed else NEUTRAL_HOVER, font=F(13),
+        ).pack(side="right", padx=(0, S(10)))
+        top.bind("<Return>", lambda _event: main_action())
+        top.bind("<Escape>", lambda _event: top.destroy())
+        top.protocol("WM_DELETE_WINDOW", top.destroy)
+        self._center_dialog(top)
 
     def _persist_tasks(self) -> bool:
         """持久化失败只提示不抛出：热键路径（F6 启动）也会走到这里，磁盘异常不能拖垮轮询循环。"""
@@ -2911,6 +3239,7 @@ class DesktopClicker:
                 icon_path,
                 on_show=lambda: self.ui_events.put((self._show_from_tray, ())),
                 on_exit=lambda: self.ui_events.put((self._exit_from_tray, ())),
+                on_check_update=lambda: self.ui_events.put((self._check_updates_manually, ())),
             )
             self._tray_icon.start()
         except (RuntimeError, OSError) as error:

@@ -1,0 +1,10 @@
+{
+    "version":  "1.1.0",
+    "notes":  "新增应用内自动更新：启动时检查新版本，一键下载校验并自动完成安装；更新横幅全新卡片式设计，深浅主题适配；修复切换主题与自动更新重启时可能崩溃的问题；轻提示不再遮挡其他应用窗口。",
+    "pageUrl":  "https://dd.zhigui.icu/",
+    "installerUrl":  "https://install.zhigui.icu/diandian/Diandian-Setup-1.1.0.exe",
+    "sha256":  "789075cedad05ea8e39f2400b0007db2b562a5bcc0a1ab4b54909e356b5a57b2",
+    "size":  35520288,
+    "minVersion":  "",
+    "publishedAt":  "2026-09-24"
+}

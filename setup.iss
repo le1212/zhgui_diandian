@@ -1,8 +1,16 @@
 ; 点点 - 桌面连点器 安装程序脚本
+; 版本号单一来源：version.py 首行 APP_VERSION = "x.y.z"（ISPP 取行内第一对英文双引号之间的内容）
 #define MyAppName "点点"
-#define MyAppVersion "1.0.0"
 #define MyAppPublisher "Zhgui"
 #define MyAppExeName "点点.exe"
+#define VersionReader FileOpen(SourcePath + "\version.py")
+#define VersionLine FileRead(VersionReader)
+#expr FileClose(VersionReader)
+#define VersionTail Copy(VersionLine, Pos('"', VersionLine) + 1, 64)
+#define MyAppVersion Copy(VersionTail, 1, Pos('"', VersionTail) - 1)
+#if MyAppVersion == ""
+  #error 无法从 version.py 解析 APP_VERSION，请检查首行格式
+#endif
 
 [Setup]
 AppId={{B7E1F3A2-8C4D-4F1A-9E2D-5B6A7C8D9E0F}
@@ -12,8 +20,11 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+; 与应用内单实例互斥体一致：升级前检测运行中的点点并自动关闭
+AppMutex=Diandian.SingleInstance
+CloseApplications=yes
 OutputDir=installer
-OutputBaseFilename=点点
+OutputBaseFilename=Diandian-Setup-{#MyAppVersion}
 SetupIconFile=assets\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
@@ -64,4 +75,5 @@ Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; 静默升级（自动更新）也拉起新版：不带 skipifsilent，安装完成后自动重启点点
+Filename: "{app}\{#MyAppExeName}"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall

@@ -118,7 +118,8 @@ def text_font(spec: tuple) -> tkfont.Font:
     return _FONTS[key]
 
 
-def rounded_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, radius: float, **kw):
+def rounded_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, radius: float, fill: str = "", **kw):
+    """fill 默认透明：Tk 多边形的原生默认是不透明的系统色，outline-only 的焦点描边会被盖成实心色块。"""
     radius = max(0.0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
     points = (
         x1 + radius, y1, x2 - radius, y1,
@@ -128,12 +129,15 @@ def rounded_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, 
         x1, y2, x1, y2 - radius,
         x1, y1 + radius, x1, y1,
     )
-    return canvas.create_polygon(points, smooth=True, **kw)
+    return canvas.create_polygon(points, smooth=True, fill=fill, **kw)
 
 
 def paint_icon(canvas: tk.Canvas, name: str, cx: float, cy: float, size: float, color: str, bg: str = CARD_BG) -> None:
-    """在画布上绘制矢量小图标，(cx, cy) 为图标中心，size 为已缩放的边长。PIL 3x 超采样抗锯齿。"""
-    key = (name, color, int(size), bg)
+    """在画布上绘制矢量小图标，(cx, cy) 为图标中心，size 为已缩放的边长。PIL 3x 超采样抗锯齿。
+
+    缓存键以解释器开头：PhotoImage 只在创建它的 Tk 解释器内有效。
+    """
+    key = (canvas.tk, name, color, int(size), bg)
     if key not in _ICON_PHOTO_CACHE:
         _ICON_PHOTO_CACHE[key] = ImageTk.PhotoImage(_render_icon_image(name, color, int(size), bg))
     canvas.create_image(cx, cy, image=_ICON_PHOTO_CACHE[key])

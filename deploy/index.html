@@ -44,11 +44,11 @@
     "@type": "Person",
     "name": "Zhgui"
   },
-  "softwareVersion": "1.0",
-  "fileSize": "<10MB",
+  "softwareVersion": "1.1.0",
+  "fileSize": "35MB",
   "operatingSystemRequirements": "Windows 10 及以上",
-  "downloadUrl": "https://dd.zhigui.icu/Diandian.exe",
-  "installUrl": "https://dd.zhigui.icu/Diandian.exe",
+  "downloadUrl": "https://dd.zhigui.icu/",
+  "installUrl": "https://dd.zhigui.icu/",
   "isAccessibleForFree": true,
   "dateModified": "2026-09-23",
   "offers": {
@@ -63,6 +63,7 @@
     "图像模板匹配定位点击",
     "F2 全局捕获坐标，F6 启停，F7 暂停，Esc 紧急停止",
     "Per-Monitor DPI Aware，多显示器适配",
+    "应用内自动更新（SHA-256 校验，自动完成升级）",
     "PyInstaller 单文件 exe，免安装 Python"
   ]
 }
@@ -108,6 +109,14 @@
     },
     {
       "@type": "Question",
+      "name": "点点如何更新？",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "点点内置自动更新。启动时会后台检查新版本（每天最多一次，不影响使用），发现新版本后在主窗口提示，一键下载安装包并通过 SHA-256 校验后自动完成升级，任务数据完整保留。绿色版用户会自动引导到官网下载最新版。"
+      }
+    },
+    {
+      "@type": "Question",
       "name": "点点的快捷键是什么？",
       "acceptedAnswer": {
         "@type": "Answer",
@@ -134,7 +143,7 @@
       "@type": "HowToStep",
       "position": 1,
       "name": "下载并打开",
-      "text": "下载单文件 Diandian.exe，双击即可运行，无需安装 Python 或任何依赖。"
+      "text": "下载安装包完成安装即可（另提供免安装绿色版），无需安装 Python 或任何依赖。"
     },
     {
       "@type": "HowToStep",
@@ -279,9 +288,9 @@
 <section id="cta" class="cta-section reveal">
   <span class="eyebrow">点亮你的第一颗星</span>
   <h2>现在，开始连点</h2>
-  <p class="lead">下载点点桌面版，按 F2 捕获一个坐标，按 F6 开始。剩下的，交给点点。</p>
+  <p class="lead">下载点点桌面版，按 F2 捕获一个坐标，按 F6 开始。剩下的，交给点点。以后的新版本也一样——点点会自己检查、下载并装好。</p>
   <div class="hero-cta">
-    <a href="https://www.baidu.com/" class="btn-primary" target="_blank" rel="noopener">立即下载</a>
+    <a href="https://install.zhigui.icu/diandian/Diandian-Setup-1.1.0.exe" class="btn-primary" data-download>立即下载</a>
   </div>
 </section>
 
@@ -321,6 +330,13 @@
     </details>
 
     <details class="faq-item">
+      <summary><h3>点点如何更新？</h3></summary>
+      <p>
+        点点内置自动更新。启动时会后台检查新版本（每天最多一次，不影响使用），发现新版本后在主窗口提示，一键下载安装包并通过 SHA-256 校验后自动完成升级，任务数据完整保留。绿色版用户会自动引导到官网下载最新版。
+      </p>
+    </details>
+
+    <details class="faq-item">
       <summary><h3>点点的快捷键有哪些？</h3></summary>
       <p>
         F2 捕获当前鼠标坐标并记录目标窗口；F6 开始或停止当前任务；F7 暂停或继续当前任务；Esc 紧急停止并恢复主窗口。所有快捷键在任意前台窗口均可全局生效，无需切换到点点主界面。
@@ -336,5 +352,23 @@
 
 <script src="assets/galaxy.js"></script>
 <script src="assets/reveal.js"></script>
+<script>
+/* 下载地址跟随 updates/latest.json：发版只需更新清单与安装包，落地页无需改版。
+   href 中写死的地址仅作为 JS 不可用时的兜底。 */
+(function () {
+  if (!window.fetch) return;
+  fetch("updates/latest.json", { cache: "no-cache" })
+    .then(function (res) { return res.ok ? res.json() : null; })
+    .then(function (manifest) {
+      if (!manifest || !manifest.installerUrl) return;
+      var target = new URL(manifest.installerUrl, location.href);
+      if (target.protocol !== "https:") return;
+      document.querySelectorAll("a[data-download]").forEach(function (link) {
+        link.href = target.href;
+      });
+    })
+    .catch(function () {});
+})();
+</script>
 </body>
 </html>
