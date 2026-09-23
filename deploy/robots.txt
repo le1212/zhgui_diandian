@@ -1,0 +1,6 @@
+# 点点连点器官网：允许所有搜索引擎与 AI 爬虫检索
+User-agent: *
+Allow: /
+Disallow: /_shots/
+
+Sitemap: https://dd.zhigui.icu/sitemap.xml
