@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import time
 import unittest
 import tkinter as tk
 
-from desktop_app import S, Select
+from widgets import S, Select
 
 
 class SelectPopupTests(unittest.TestCase):
@@ -20,9 +21,15 @@ class SelectPopupTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        try:
-            cls.root = tk.Tk()
-        except tk.TclError:
+        # 快速连续创建/销毁多个 Tk 实例时，Windows 下偶发瞬态创建失败，重试数次
+        cls.root = None
+        for _attempt in range(5):
+            try:
+                cls.root = tk.Tk()
+                break
+            except tk.TclError:
+                time.sleep(0.3)
+        if cls.root is None:
             raise unittest.SkipTest("无可用显示器，跳过下拉框界面测试")
         cls.root.geometry("240x80")
 

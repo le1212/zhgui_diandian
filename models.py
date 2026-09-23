@@ -10,6 +10,13 @@ from typing import Any
 
 
 SCHEMA_VERSION = 2
+SCHEDULE_SCHEMA_VERSION = 1
+
+
+class ScheduleKind:
+    ONCE = "once"
+    DAILY = "daily"
+    INTERVAL = "interval"
 
 
 def new_id(prefix: str) -> str:
@@ -157,6 +164,36 @@ class Task:
         clone.updated_at = clone.created_at
         clone.deleted_at = None
         return clone
+
+
+@dataclass
+class Schedule:
+    id: str = field(default_factory=lambda: new_id("schedule"))
+    task_id: str = ""
+    kind: str = ScheduleKind.ONCE
+    run_at: float | None = None
+    interval_seconds: int = 3600
+    enabled: bool = True
+    last_run_at: float | None = None
+    last_result: str = ""
+    created_at: float = field(default_factory=time.time)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "Schedule":
+        return cls(
+            id=value.get("id") or new_id("schedule"),
+            task_id=value.get("task_id", ""),
+            kind=value.get("kind", ScheduleKind.ONCE),
+            run_at=float(value["run_at"]) if value.get("run_at") is not None else None,
+            interval_seconds=max(1, int(value.get("interval_seconds", 3600))),
+            enabled=bool(value.get("enabled", True)),
+            last_run_at=float(value["last_run_at"]) if value.get("last_run_at") is not None else None,
+            last_result=str(value.get("last_result", "")),
+            created_at=float(value.get("created_at", time.time())),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def migrate_payload(payload: Any) -> tuple[list[Task], bool]:

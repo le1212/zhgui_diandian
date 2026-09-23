@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from models import SCHEMA_VERSION, Task, migrate_payload
+from models import SCHEMA_VERSION, SCHEDULE_SCHEMA_VERSION, Schedule, Task, migrate_payload
 
 
 class TaskRepository:
@@ -17,6 +17,7 @@ class TaskRepository:
         self.base_dir = base_dir
         self.tasks_path = base_dir / "tasks.json"
         self.trash_path = base_dir / "trash.json"
+        self.schedules_path = base_dir / "schedules.json"
         self.backup_dir = base_dir / "backups"
         self.template_dir = base_dir / "templates"
         for directory in (base_dir, self.backup_dir, self.template_dir):
@@ -54,6 +55,29 @@ class TaskRepository:
     def save_trash(self, tasks: list[Task]) -> None:
         payload = {"schemaVersion": SCHEMA_VERSION, "tasks": [task.to_dict() for task in tasks]}
         self._atomic_write(self.trash_path, payload, create_backup=False)
+
+    def load_schedules(self) -> list[Schedule]:
+        if not self.schedules_path.exists():
+            return []
+        try:
+            payload = json.loads(self.schedules_path.read_text(encoding="utf-8"))
+            values = payload.get("schedules", []) if isinstance(payload, dict) else payload
+            schedules: list[Schedule] = []
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    # 单条损坏只跳过该条，不让全部定时计划静默消失
+                    schedules.append(Schedule.from_dict(item))
+                except (ValueError, TypeError):
+                    continue
+            return schedules
+        except (OSError, ValueError, TypeError):
+            return []
+
+    def save_schedules(self, schedules: list[Schedule]) -> None:
+        payload = {"schemaVersion": SCHEDULE_SCHEMA_VERSION, "schedules": [item.to_dict() for item in schedules]}
+        self._atomic_write(self.schedules_path, payload, create_backup=False)
 
     def delete_template_if_unused(self, template_file: str, active: list[Task], trash: list[Task]) -> None:
         if not template_file:

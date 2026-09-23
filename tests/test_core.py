@@ -58,7 +58,9 @@ class ImageLocatorTests(unittest.TestCase):
         image = generator.normal(120, 20, (100, 140)).astype(np.float32)
         template = generator.normal(120, 20, (18, 22)).astype(np.float32)
         image[37:55, 71:93] = template
-        x, y, score = _normalized_cross_correlation(image, template)
+        fft_shape = (image.shape[0] + template.shape[0] - 1, image.shape[1] + template.shape[1] - 1)
+        template_fft = np.fft.rfftn(np.flip(template), fft_shape, axes=(0, 1))
+        x, y, score = _normalized_cross_correlation(image, template, template_fft)
         self.assertEqual((x, y), (71, 37))
         self.assertGreater(score, .99)
 

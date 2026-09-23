@@ -13,6 +13,13 @@ USER32 = ctypes.WinDLL("user32", use_last_error=True)
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 
+# 模板缓存：(路径, mtime, 大小, 缩放档) → 缩放后数组；(…, FFT 形状) → 翻转 FFT。
+# 图像定位每步都重新全屏匹配，模板部分与屏幕内容无关，缓存后每次少一次
+# 全尺寸 FFT 与文件解码；FIFO 限量防止换用大量模板时内存无界增长。
+_TEMPLATE_ARRAY_CACHE: dict[tuple, np.ndarray] = {}
+_TEMPLATE_FFT_CACHE: dict[tuple, np.ndarray] = {}
+_TEMPLATE_CACHE_LIMIT = 12
+
 
 class ImageNotFoundError(RuntimeError):
     pass
@@ -26,20 +33,24 @@ def locate_template(template_path: Path, threshold: float = 0.86) -> tuple[int, 
     if not template_path.exists():
         raise ImageNotFoundError(f"图像模板不存在：{template_path.name}")
     screenshot = ImageGrab.grab(all_screens=True).convert("L")
-    template = Image.open(template_path).convert("L")
-    if template.width > screenshot.width or template.height > screenshot.height:
+    with Image.open(template_path) as source:
+        template_width, template_height = source.size
+    if template_width > screenshot.width or template_height > screenshot.height:
         raise ImageNotFoundError("图像模板大于当前桌面范围")
 
-    scale = _matching_scale(template.width, template.height)
+    scale = _matching_scale(template_width, template_height)
     screen_array = _as_array(screenshot, scale)
-    template_array = _as_array(template, scale)
-    coarse_x, coarse_y, score = _normalized_cross_correlation(screen_array, template_array)
+    scaled_w = max(4, round(template_width * scale))
+    scaled_h = max(4, round(template_height * scale))
+    fft_shape = (screen_array.shape[0] + scaled_h - 1, screen_array.shape[1] + scaled_w - 1)
+    template_array, template_fft = _cached_template(template_path, scale, fft_shape)
+    coarse_x, coarse_y, score = _normalized_cross_correlation(screen_array, template_array, template_fft)
     if score < threshold:
         raise ImageNotFoundError(f"未找到目标图像，最高相似度 {score:.0%}，要求 {threshold:.0%}")
 
     screen_x, screen_y = virtual_screen_origin()
-    match_x = round(coarse_x / scale + template.width / 2) + screen_x
-    match_y = round(coarse_y / scale + template.height / 2) + screen_y
+    match_x = round(coarse_x / scale + template_width / 2) + screen_x
+    match_y = round(coarse_y / scale + template_height / 2) + screen_y
     return match_x, match_y, score
 
 
@@ -59,18 +70,36 @@ def _as_array(image: Image.Image, scale: float) -> np.ndarray:
     return np.asarray(image, dtype=np.float32)
 
 
-def _normalized_cross_correlation(image: np.ndarray, template: np.ndarray) -> tuple[int, int, float]:
+def _cache_put(cache: dict, key: tuple, value) -> None:
+    if len(cache) >= _TEMPLATE_CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+def _cached_template(template_path: Path, scale: float, fft_shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    stat = template_path.stat()
+    base_key = (str(template_path), stat.st_mtime_ns, stat.st_size, scale)
+    array = _TEMPLATE_ARRAY_CACHE.get(base_key)
+    if array is None:
+        array = _as_array(Image.open(template_path).convert("L"), scale)
+        _cache_put(_TEMPLATE_ARRAY_CACHE, base_key, array)
+    fft_key = (*base_key, fft_shape)
+    fft = _TEMPLATE_FFT_CACHE.get(fft_key)
+    if fft is None:
+        fft = np.fft.rfftn(np.flip(array), fft_shape, axes=(0, 1))
+        _cache_put(_TEMPLATE_FFT_CACHE, fft_key, fft)
+    return array, fft
+
+
+def _normalized_cross_correlation(image: np.ndarray, template: np.ndarray, template_fft: np.ndarray) -> tuple[int, int, float]:
     image_height, image_width = image.shape
     template_height, template_width = template.shape
-    template_variance = float(template.var())
-    if template_variance < 1:
+    if float(template.var()) < 1:
         raise ImageNotFoundError("图像模板内容过于单一，请选择包含文字或边缘的区域")
 
     fft_shape = (image_height + template_height - 1, image_width + template_width - 1)
-    axes = (0, 1)
-    image_fft = np.fft.rfftn(image, fft_shape, axes=axes)
-    template_fft = np.fft.rfftn(np.flip(template), fft_shape, axes=axes)
-    correlation = np.fft.irfftn(image_fft * template_fft, fft_shape, axes=axes)
+    image_fft = np.fft.rfftn(image, fft_shape, axes=(0, 1))
+    correlation = np.fft.irfftn(image_fft * template_fft, fft_shape, axes=(0, 1))
     valid = correlation[template_height - 1:image_height, template_width - 1:image_width]
 
     integral_sq = _integral_image(image.astype(np.float64) ** 2)

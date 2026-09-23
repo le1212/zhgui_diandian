@@ -3,7 +3,114 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>点点 · Windows 桌面连点器</title>
+<title>点点 · Windows 桌面连点器 · By·Zhgui</title>
+
+<meta name="description" content="点点是一款基于 Win32 SendInput 的 Windows 桌面连点器，支持单点/多点任务、真实鼠标录制（Raw Input）、键盘滚轮录制、图像模板匹配定位、F2 捕获坐标、F6 启停、Esc 紧急停止。轻量单文件 exe，无需安装 Python。">
+<meta name="keywords" content="连点器,自动点击,鼠标连点,Windows连点器,自动按键,鼠标录制,脚本工具,自动化工具,点点连点器,Diandian">
+<meta name="author" content="Zhgui">
+<meta name="robots" content="index, follow">
+<meta name="language" content="zh-CN">
+<meta name="revisit-after" content="7 days">
+<meta name="theme-color" content="#0d9488">
+
+<!-- Open Graph / Facebook -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="点点 · Windows 桌面连点器">
+<meta property="og:description" content="把所有重复的操作，聚成同一片星轨。基于 Win32 SendInput 的真实鼠标连点器，支持录制、多点任务、图像定位。">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:site_name" content="点点连点器">
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="点点 · Windows 桌面连点器">
+<meta name="twitter:description" content="基于 Win32 SendInput 的真实鼠标连点器，支持录制、多点任务、图像定位。">
+
+<!-- Structured Data: SoftwareApplication -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "点点连点器",
+  "alternateName": "Diandian Auto Clicker",
+  "operatingSystem": "Windows",
+  "applicationCategory": "UtilitiesApplication",
+  "description": "基于 Win32 SendInput 的 Windows 桌面鼠标连点器，支持单点/多点任务、真实鼠标录制（Raw Input）、键盘滚轮录制、图像模板匹配定位、F2 坐标捕获、F6 启停、Esc 紧急停止。",
+  "author": {
+    "@type": "Person",
+    "name": "Zhgui"
+  },
+  "softwareVersion": "1.0",
+  "fileSize": "<10MB",
+  "installUrl": "https://dd.zhigui.icu/Diandian.exe",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "CNY"
+  },
+  "featureList": [
+    "真实鼠标录制（Raw Input，无低级 Hook）",
+    "单点/多点任务混合编排",
+    "键盘与滚轮事件录制",
+    "图像模板匹配定位点击",
+    "F2 全局捕获坐标，F6 启停，F7 暂停，Esc 紧急停止",
+    "Per-Monitor DPI Aware，多显示器适配",
+    "PyInstaller 单文件 exe，免安装 Python"
+  ]
+}
+</script>
+
+<!-- Structured Data: FAQ -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "点点连点器是什么？",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "点点是一款基于 Win32 SendInput API 的 Windows 桌面鼠标连点器，通过真实系统输入接口模拟鼠标点击，支持单点、多点任务编排、鼠标录制、键盘滚轮录制和图像定位点击。"
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "点点连点器安全吗？会被检测吗？",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "点点采用 Raw Input 方式录制鼠标轨迹，不安装全局低级鼠标 Hook；运行时通过 SendInput 注入真实系统事件。任务数据仅保存在本地 %APPDATA%\Diandian 目录，不上传任何信息。"
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "点点支持多显示器吗？",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "支持。点点启用了 Per-Monitor DPI Awareness，可在不同 DPI 缩放比例的多显示器间精确定位坐标，图像模板匹配会在所有显示器区域内搜索目标。"
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "点点需要安装 Python 吗？",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "不需要。通过 PyInstaller 构建为单文件 Diandian.exe，双击即可运行，目标机器无需安装 Python 或任何依赖。"
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "点点的快捷键是什么？",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "F2 捕获当前鼠标坐标，F6 开始/停止当前任务，F7 暂停/继续当前任务，Esc 紧急停止并恢复主窗口。所有快捷键在任意前台窗口均可生效。"
+      }
+    }
+  ]
+}
+</script>
+
+
+<link rel="canonical" href="https://dd.zhigui.icu/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E<defs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%235eead4'/%3E%3Cstop offset='1' stop-color='%230d9488'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Ccircle cx='32' cy='26' r='4' fill='white'/%3E%3Ccircle cx='32' cy='26' r='7' fill='none' stroke='white' stroke-width='1' opacity='0.5'/%3E%3Ccircle cx='32' cy='26' r='10' fill='none' stroke='white' stroke-width='1' opacity='0.25'/%3E%3Cpath d='M31 32 L31 44 Q31 47 34 47 L44 47 Q47 47 47 44 L47 34 Q47 31 44 31 L37 31' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3Ccircle cx='24' cy='48' r='2.5' fill='white'/%3E%3Ccircle cx='29' cy='53' r='2' fill='white' opacity='0.85'/%3E%3C/svg%3E">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -430,12 +537,57 @@
   <h2>现在，开始连点</h2>
   <p class="lead">下载点点桌面版，按 F2 捕获一个坐标，按 F6 开始。剩下的，交给点点。</p>
   <div class="hero-cta" style="justify-content:center;">
-    <a href="#" class="btn-primary" onclick="toast('演示环境：请从 dist 目录获取实际构建产物'); return false;">立即下载</a>
+    <a href="https://www.baidu.com/" class="btn-primary" target="_blank" rel="noopener">立即下载</a>
+  </div>
+</section>
+
+
+<!-- ===== FAQ（GEO/SEO：AI 搜索引擎易引用）===== -->
+<section id="faq" class="reveal" style="max-width:820px;margin:0 auto;">
+  <span class="eyebrow">常见问题</span>
+  <h2>你想知道的，都在这里</h2>
+  <div style="margin-top:36px;display:flex;flex-direction:column;gap:16px;text-align:left;">
+
+    <details style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px 24px;">
+      <summary style="cursor:pointer;font-weight:600;font-size:17px;color:#fff;outline:none;">点点连点器是什么？</summary>
+      <p style="margin-top:12px;color:#94a3b8;font-size:15px;line-height:1.7;">
+        点点是一款基于 Win32 SendInput API 的 Windows 桌面鼠标连点器。它通过真实系统输入接口模拟鼠标点击，支持单点、多点任务编排、鼠标录制、键盘滚轮录制和图像定位点击。与低级 Hook 类工具不同，点点使用 Raw Input 录制，不安装全局钩子，安全可控。
+      </p>
+    </details>
+
+    <details style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px 24px;">
+      <summary style="cursor:pointer;font-weight:600;font-size:17px;color:#fff;outline:none;">点点安全吗？会被反作弊检测吗？</summary>
+      <p style="margin-top:12px;color:#94a3b8;font-size:15px;line-height:1.7;">
+        点点不安装全局低级鼠标 Hook，录制阶段使用 Raw Input 读取原始输入；运行时通过 SendInput 注入系统级真实事件。任务数据仅保存在本地 %APPDATA%\Diandian 目录，不上传任何信息。请在合规场景下使用。
+      </p>
+    </details>
+
+    <details style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px 24px;">
+      <summary style="cursor:pointer;font-weight:600;font-size:17px;color:#fff;outline:none;">点点支持多显示器和不同 DPI 吗？</summary>
+      <p style="margin-top:12px;color:#94a3b8;font-size:15px;line-height:1.7;">
+        支持。点点启用了 Per-Monitor DPI Awareness，可在不同 DPI 缩放比例的多显示器间精确定位坐标。图像模板匹配功能会在所有显示器区域内搜索目标图案并自动点击。
+      </p>
+    </details>
+
+    <details style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px 24px;">
+      <summary style="cursor:pointer;font-weight:600;font-size:17px;color:#fff;outline:none;">点点需要安装 Python 吗？是免费的吗？</summary>
+      <p style="margin-top:12px;color:#94a3b8;font-size:15px;line-height:1.7;">
+        不需要。点点通过 PyInstaller 构建为单文件 Diandian.exe，双击即可运行，目标机器无需安装 Python 或任何依赖。个人使用完全免费。
+      </p>
+    </details>
+
+    <details style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px 24px;">
+      <summary style="cursor:pointer;font-weight:600;font-size:17px;color:#fff;outline:none;">点点的快捷键有哪些？</summary>
+      <p style="margin-top:12px;color:#94a3b8;font-size:15px;line-height:1.7;">
+        F2 捕获当前鼠标坐标并记录目标窗口；F6 开始或停止当前任务；F7 暂停或继续当前任务；Esc 紧急停止并恢复主窗口。所有快捷键在任意前台窗口均可全局生效，无需切换到点点主界面。
+      </p>
+    </details>
+
   </div>
 </section>
 
 <footer>
-  点点 · Windows 桌面连点器 · 任务数据存于 %APPDATA%\Diandian
+  点点 · Windows 桌面连点器 · By·Zhgui
 </footer>
 
 <script>
