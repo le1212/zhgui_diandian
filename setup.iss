@@ -12,7 +12,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-OutputDir=dist
+OutputDir=installer
 OutputBaseFilename=点点
 SetupIconFile=assets\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -22,28 +22,35 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 
 [Messages]
+; 按钮
+ButtonBack=< 上一步(&B)
+ButtonNext=下一步(&N) >
+ButtonInstall=安装(&I)
+ButtonFinish=完成(&F)
+ButtonCancel=取消
+ButtonWizardBrowse=浏览(&B)...
 ; 欢迎页
 WelcomeLabel1=欢迎使用 [name] 安装向导
 WelcomeLabel2=本程序将引导您完成 [name] 的安装。%n%n建议关闭其他应用程序后再继续。
 ; 选择目录页
-SelectDirLabel=请选择 [name] 的安装位置
-SelectDirEditLabel=安装文件夹(&I):
-BrowseButton=浏览(&B)...
+SelectDirDesc=请选择 [name] 的安装位置
+SelectDirLabel3=安装程序将把 [name] 安装到以下文件夹。
+SelectDirBrowseLabel=点击"下一步"继续。如果要选择其他文件夹，请点击"浏览"。
 ; 准备安装页
-ReadyLabel=安装程序已准备就绪
-ReadyLabel2=点击"安装"开始安装，点击"上一步"可重新设置。
+ReadyLabel1=安装程序已准备就绪
+ReadyLabel2a=点击"安装"开始安装，点击"上一步"可重新设置。
+ReadyLabel2b=点击"安装"开始安装。
 ; 完成页
 FinishedLabel=[name] 安装完成
-FinishedLabel2=安装程序已成功在您的计算机上安装 [name]。%n%n点击"完成"退出安装向导。
-; 按钮
-NextButton=下一步(&N) >
-BackButton=< 上一步(&B)
-InstallButton=安装(&I)
-FinishButton=完成(&F)
-CancelButton=取消
-; 其他
+FinishedLabelNoIcons=[name] 安装完成
+; 安装状态
+StatusClosingApplications=正在关闭应用程序...
+StatusCreateDirs=正在创建目录...
+StatusExtractFiles=正在解压文件...
+; 卸载
 ConfirmUninstall=您确定要完全删除 [name] 及其所有组件吗？
-Uninstalling=正在卸载...
+UninstallStatusLabel=请稍候，[name] 正在从您的计算机中移除。
+UninstalledAll=[name] 已成功从您的计算机中移除。
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: unchecked
