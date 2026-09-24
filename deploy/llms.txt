@@ -31,4 +31,5 @@
 
 - 官网：<https://dd.zhigui.icu/>
 - 下载：<https://dd.zhigui.icu/>（官网首页即下载页，应用内自动更新）
+- 开源仓库：<https://github.com/le1212/zhgui_diandian>
 - 作者：Zhgui · 知归社区 <https://i.zhigui.icu>

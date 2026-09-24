@@ -157,6 +157,8 @@ h2 {
   display: flex;
   gap: 16px;
   align-items: center;
+  /* 窄屏放不下三颗按钮时整行换行，而不是压缩或溢出视口 */
+  flex-wrap: wrap;
 }
 .btn-ghost {
   padding: 9px 20px;
@@ -168,6 +170,13 @@ h2 {
   transition: border-color 0.2s, color 0.2s;
 }
 .btn-ghost:hover { border-color: #2dd4bf; color: #2dd4bf; }
+/* GitHub 开源入口：与 ghost 按钮同视觉语言，图标与文字同行垂直居中 */
+.btn-github {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.btn-github svg { flex-shrink: 0; }
 .scroll-hint {
   position: absolute;
   bottom: 40px;
