@@ -33,8 +33,12 @@ def locate_template(template_path: Path, threshold: float = 0.86) -> tuple[int, 
     if not template_path.exists():
         raise ImageNotFoundError(f"图像模板不存在：{template_path.name}")
     screenshot = ImageGrab.grab(all_screens=True).convert("L")
-    with Image.open(template_path) as source:
-        template_width, template_height = source.size
+    try:
+        with Image.open(template_path) as source:
+            template_width, template_height = source.size
+    except (OSError, ValueError) as error:
+        # 模板文件损坏/被替换为非图片：给出中文指引，而不是让 PIL 的英文异常中断运行
+        raise ImageNotFoundError(f"图像模板损坏或不是有效图片：{template_path.name}") from error
     if template_width > screenshot.width or template_height > screenshot.height:
         raise ImageNotFoundError("图像模板大于当前桌面范围")
 

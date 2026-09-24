@@ -204,7 +204,10 @@ class TrayIcon:
             instance = KERNEL32.GetModuleHandleW(None)
             window_class = WNDCLASSW(lpfnWndProc=window_proc, hInstance=instance, lpszClassName=class_name)
             if not USER32.RegisterClassW(ctypes.byref(window_class)):
-                raise OSError(ctypes.get_last_error(), "无法注册托盘窗口类")
+                # 停止托盘时类名未注销（进程存活期间不会释放），重复 start 会到这里；
+                # 类已存在即视为注册成功，托盘图标必须支持一次运行内反复启停
+                if KERNEL32.GetLastError() != 1410:  # ERROR_CLASS_ALREADY_EXISTS
+                    raise OSError(ctypes.get_last_error(), "无法注册托盘窗口类")
             # 普通隐藏窗口而非消息窗口：需要接收 TaskbarCreated 广播
             self._window = int(USER32.CreateWindowExW(0, class_name, class_name, 0, 0, 0, 0, 0, None, None, instance, None))
             if not self._window:
@@ -234,6 +237,10 @@ class TrayIcon:
         if hicon:
             data.hIcon = hicon
             data.uFlags |= NIF_ICON
+        # Explorer 重启重建图标时旧句柄未销毁会泄漏 GDI 资源，先销毁再覆盖
+        if self._icon_handle:
+            USER32.DestroyIcon(self._icon_handle)
+            self._icon_handle = 0
         self._added = bool(SHELL32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(data)))
         if self._added and hicon:
             # 图标句柄由 Shell 持有引用，删除托盘图标后再销毁，避免句柄泄漏

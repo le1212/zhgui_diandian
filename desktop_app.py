@@ -115,6 +115,11 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self.root.bind("<Map>", self._on_window_restore)
         # 点外失焦：点击主窗口非输入区域时把焦点交还给根窗口（add 叠加不干扰既有绑定）
         self.root.bind("<Button-1>", self._dismiss_entry_focus, add="+")
+        # 步骤编辑快捷键（文案中承诺过 Ctrl+Z / Ctrl+D）；焦点在文本框内时不抢占
+        self.root.bind("<Control-z>", self._undo_hotkey)
+        self.root.bind("<Control-Z>", self._undo_hotkey)
+        self.root.bind("<Control-d>", self._duplicate_hotkey)
+        self.root.bind("<Control-D>", self._duplicate_hotkey)
         self.thumbs_dir = self.app_data_dir / "thumbs"
         self.thumbs_dir.mkdir(parents=True, exist_ok=True)
         self.tasks = self.repository.load_tasks()
@@ -183,6 +188,8 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self._run_clicks = 0
         self._run_started_at = 0.0
         self._run_interval_ms = 0
+        self._paused_ms_total = 0
+        self._pause_started_at = 0.0
         self._care_job: str | None = None
         today = dt.date.today()
         self._startup_milestones, self._absent_days = self.stats.note_session_start(
@@ -904,10 +911,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
     def add_wait_step(self) -> None:
         if not self._editing_allowed():
             return
-        self._push_undo_state()
         wait_ms = self._ask_input_dialog("添加等待", "等待时间（毫秒）", initial="500", input_type="int", minvalue=0, maxvalue=3_600_000)
         if wait_ms is None:
             return
+        self._push_undo_state()  # 确认后才入撤销栈：取消对话框不产生假撤销
         self.steps.append(Step(type="wait", wait_ms=wait_ms))
         self._render_steps()
         self.save_task(silent=True)
@@ -917,10 +924,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
     def add_scroll_step(self) -> None:
         if not self._editing_allowed():
             return
-        self._push_undo_state()
         delta = self._ask_input_dialog("添加滚轮", "滚动量（正数向上，负数向下，120 为一格）", initial="-120", input_type="int", minvalue=-12000, maxvalue=12000)
         if delta is None:
             return
+        self._push_undo_state()
         self.steps.append(Step(type="scroll", wait_ms=self._interval_ms(), scroll_delta=delta))
         self._render_steps()
         self.save_task(silent=True)
@@ -930,11 +937,11 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
     def add_key_step(self) -> None:
         if not self._editing_allowed():
             return
-        self._push_undo_state()
         picked = self._ask_key_dialog("添加按键")
         if picked is None:
             return
         code, name = picked
+        self._push_undo_state()
         tap = Step(type="key_down", wait_ms=self._interval_ms(), key_code=code, key_name=name)
         release = Step(type="key_up", wait_ms=30, key_code=code, key_name=name)
         self.steps.extend((tap, release))
@@ -946,10 +953,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
     def add_text_step(self) -> None:
         if not self._editing_allowed():
             return
-        self._push_undo_state()
         text = self._ask_text_dialog("输入文字", "要输入的内容（支持中英文）：")
         if text is None:
             return
+        self._push_undo_state()
         step = Step(type="type_text", wait_ms=self._interval_ms(), text=text)
         self.steps.append(step)
         self._render_steps()
@@ -962,6 +969,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             return
         selected = sorted(int(value) for value in self.step_list.curselection())
         if not selected:
+            self._set_status("请先在步骤列表中选中步骤")
             return
         self._push_undo_state()
         # 倒序插入，避免索引偏移
@@ -983,8 +991,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             return
         index = self._selected_step_index()
         if index is None:
+            self._set_status("请先在步骤列表中选中要测试的步骤")
             return
         step = copy.deepcopy(self.steps[index])
+        self.window_coordinator.remember_state()
         self.root.withdraw()
         self.root.update()
 
@@ -1003,11 +1013,12 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
     def move_step(self, direction: int) -> None:
         if not self._editing_allowed():
             return
-        self._push_undo_state()
         index = self._selected_step_index()
         target = index + direction if index is not None else -1
         if index is None or target < 0 or target >= len(self.steps):
+            self._set_status("请先在步骤列表中选中要移动的步骤")
             return
+        self._push_undo_state()
         self.steps[index], self.steps[target] = self.steps[target], self.steps[index]
         self._render_steps()
         self.step_list.selection_clear(0, tk.END)
@@ -1040,6 +1051,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             return
         selected = sorted((int(value) for value in self.step_list.curselection()), reverse=True)
         if not selected:
+            self._set_status("请先在步骤列表中选中要删除的步骤")
             return
         removed = [(index, self.steps.pop(index)) for index in selected]
         self.undo_stack.append(("steps", removed))
@@ -1054,9 +1066,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         if not self._ask_confirm("清空路径", f"确定清空当前路径吗？\n将移除全部 {len(self.steps)} 个步骤，任务设置会保留。", danger=True, confirm_text="清空"):
             return
         removed = list(enumerate(self.steps))
-        for _idx, step in removed:
-            self._delete_thumb(step.id)
-            self._step_thumbs.pop(step.id, None)
+        # 缩略图文件保留在磁盘上供撤销恢复；孤儿文件由退出时的清理统一回收
         self.undo_stack.append(("steps", removed))
         self.steps = []
         self._render_steps()
@@ -1150,6 +1160,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self.drag_step_index = None
         if source == target or source >= len(self.steps) or target >= len(self.steps):
             return
+        self._push_undo_state()
         step = self.steps.pop(source)
         self.steps.insert(target, step)
         self._render_steps()
@@ -1160,11 +1171,17 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         if self.running:
             self._set_status("任务运行中，停止后才能编辑")
             return False
+        if self.recording:
+            self._set_status("正在录制，停止后才能编辑")
+            return False
         return True
 
     def select_task(self, index: int) -> None:
         if self.running:
             self._set_status("任务运行中，停止后才能切换任务")
+            return
+        if self.recording:
+            self._set_status("正在录制，停止后才能切换任务")
             return
         if index == self.active_index:
             return
@@ -1179,6 +1196,11 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self.task_scroll.yview_moveto(0)
 
     def _mode_changed(self, *_args) -> None:
+        if self.recording:
+            # 录制期间锁定模式：切换会重排面板并让录制动作落进错误的任务形态
+            self.mode_var.set(self.tasks[self.active_index].mode)
+            self._set_status("正在录制，停止录制后才能切换模式")
+            return
         self._update_mode_ui()
         self.save_task(silent=True)
 
@@ -1248,6 +1270,19 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         if isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox, Select)):
             return
         self.root.focus_set()
+
+    def _undo_hotkey(self, _event) -> str:
+        """Ctrl+Z：焦点在文本输入框内时不抢占（那里属于输入框自身的编辑语义）。"""
+        if isinstance(self.root.focus_get(), (tk.Entry, tk.Text, tk.Spinbox)):
+            return ""
+        self.undo_last()
+        return "break"
+
+    def _duplicate_hotkey(self, _event) -> str:
+        if isinstance(self.root.focus_get(), (tk.Entry, tk.Text, tk.Spinbox)):
+            return ""
+        self.duplicate_step()
+        return "break"
 
     def _workspace_click(self, event) -> None:
         if self.running:
@@ -1320,6 +1355,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         overlay.update_idletasks()
         self.capture_overlay = overlay
         self.capture_overlay_handle = int(USER32.GetAncestor(overlay.winfo_id(), 2) or overlay.winfo_id())
+        self.window_coordinator.remember_state()
         self.root.withdraw()
         overlay.lift()
 
@@ -1340,7 +1376,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self._set_status("已取消定位")
 
     def capture_position(self) -> None:
-        if self.running:
+        if self.running or self.recording:
             return
         try:
             x, y = cursor_position()
@@ -1377,6 +1413,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
                 self._save_thumb(self.target.id, captured_thumb)
             self._render_target()
             if self.mode_var.get() in {"多点任务", "录制操作"}:
+                self._push_undo_state()
                 self.steps.append(self.target)
                 self._render_steps()
             self.save_task(silent=True)
@@ -1402,16 +1439,19 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             if index is None:
                 self._set_status("请先在步骤列表中选中要清除的步骤")
                 return
+            removed = self.steps[index]
+            if removed.type not in {"click", "scroll"}:
+                self._set_status("该步骤不包含位置信息，无需清除")
+                return
             self._push_undo_state()
-            removed = self.steps.pop(index)
-            self._delete_thumb(removed.id)
-            self._step_thumbs.pop(removed.id, None)
+            self.steps.pop(index)
             self._render_steps()
             self.save_task(silent=True)
             self._set_status(f"已清除第 {index + 1} 步")
 
     def _capture_template_region(self) -> tuple | None:
         """全屏框选模板区域，返回 (screenshot, left, top, right, bottom)，取消返回 None。"""
+        self.window_coordinator.remember_state()
         self.root.withdraw()
         self.root.update_idletasks()
         time.sleep(.15)
@@ -1483,6 +1523,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             return
         screenshot, left, top, right, bottom = region
         filename = self._save_template(screenshot, left, top, right, bottom)
+        self._push_undo_state()
         step = Step(type="image_click", wait_ms=max(0, self.interval_var.get()), button=self._selected_button(), template_file=filename)
         self.steps.append(step)
         self._render_steps()
@@ -1545,6 +1586,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self.root.wait_window(dlg)
         if not params["confirmed"]:
             return
+        self._push_undo_state()
         step = Step(type="if_image", template_file=filename, condition=params["condition"], skip_count=params["skip_count"], match_threshold=params["threshold"])
         self.steps.append(step)
         self._render_steps()
@@ -1564,10 +1606,13 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         if self.recording:
             self._stop_recording()
         else:
+            if self.running:
+                self._set_status("任务运行中，停止后才能录制")
+                return
             if self.steps and not self._ask_confirm("重新录制", f"开始录制会替换当前 {len(self.steps)} 个步骤。继续吗？\n录制后仍可按 Ctrl+Z 恢复。", confirm_text="继续"):
                 return
             if self.steps:
-                self.undo_stack.append(("steps", list(enumerate(self.steps))))
+                self._push_undo_state()  # 替换语义：撤销整体还原录制前的步骤列表
             self.steps = []
             self._render_steps()
             try:
@@ -1654,6 +1699,9 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         if self.running:
             self.stop_run("已停止运行")
             return
+        if self.recording:
+            self.show_toast("正在录制，停止录制后再运行")
+            return
         if self.mode_var.get() == "单点连点" and not self.target:
             self.show_toast("还没有位置：请先按 F2 捕获鼠标当前位置")
             return
@@ -1676,6 +1724,12 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         """从任务快照创建运行计划；手动与定时触发共用，避免读取 UI 临时状态。"""
         if self.running:
             return False
+        if self.recording:
+            self._set_status("正在录制，停止录制后才能开始任务")
+            return False
+        if self.capture_armed:
+            # 运行与捕获互斥：带着定位浮层运行会残留 armed 状态与浮层
+            self.cancel_capture()
         if task.mode == "单点连点":
             if not task.target:
                 return False
@@ -1699,6 +1753,8 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self.running = True
         self._run_started_at = time.monotonic()
         self._run_interval_ms = max(0, int(task.settings.interval_ms))
+        self._paused_ms_total = 0
+        self._pause_started_at = 0.0
         with self._stats_lock:
             self._run_clicks = 0  # 清掉上一次运行可能的残留点击，避免串账
         self._schedule_care_reminder()
@@ -1723,6 +1779,11 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
 
     def _countdown_tick(self, deadline: float, generation: int | None = None) -> None:
         if not self.running or (generation is not None and generation != self._countdown_generation):
+            return
+        if self.paused:
+            # 暂停期间倒计时冻结：截止时间随暂停顺延，恢复后继续
+            self._update_run_overlay("已暂停 · 倒计时挂起")
+            self.root.after(200, lambda: self._countdown_tick(deadline + 0.2, generation))
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -1839,10 +1900,14 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         """运行结束的陪伴感结算：累计统计、保存、刷战果卡、按优先级说话。
 
         说话优先级（同一时刻只说一句）：里程碑 > 收工仪式（≥1 分钟的完整运行）> 沉默。
+        零点击的运行（倒计时取消、启动即停）不计入统计；暂停时长从运行时长中扣除。
         """
         with self._stats_lock:
-            clicks, run_ms = self._run_clicks, int((time.monotonic() - self._run_started_at) * 1000)
+            clicks = self._run_clicks
             self._run_clicks = 0
+        run_ms = max(0, int((time.monotonic() - self._run_started_at) * 1000) - self._paused_ms_total)
+        if clicks == 0:
+            return
         fired = self.stats.note_run(clicks, run_ms, self._run_interval_ms, dt.date.today().isoformat())
         self.stats.save(self.app_data_dir / "stats.json")
         self._render_stats_card()
@@ -1876,6 +1941,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             return  # 重入守卫：worker 正常收尾与手动停止同帧到达时只结算一次
         self._countdown_generation += 1
         self.stop_event.set()
+        if self.paused and self._pause_started_at:
+            # 暂停中直接停止：把当前暂停段计入扣除总量，避免时长虚高
+            self._paused_ms_total += int((time.monotonic() - self._pause_started_at) * 1000)
+            self._pause_started_at = 0.0
         self.pause_event.clear()
         for key_code in tuple(self.run_keys_down):
             try:
@@ -1922,9 +1991,14 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self.paused = not self.paused
         if self.paused:
             self.pause_event.set()
+            self._pause_started_at = time.monotonic()
             # 暂停不计入"连续运行"：关怀计时在暂停期间挂起、恢复时重新起算
             self._cancel_care_reminder()
         else:
+            if self._pause_started_at:
+                # 统计口径对齐：暂停时长从运行时长中扣除
+                self._paused_ms_total += int((time.monotonic() - self._pause_started_at) * 1000)
+            self._pause_started_at = 0.0
             self.pause_event.clear()
             self._schedule_care_reminder()
         status = "已暂停" if self.paused else "正在运行"
@@ -1956,9 +2030,13 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         if not silent:
             # 显式保存（按钮/回车）后把焦点移出输入框，避免光标一直留在名称框
             self.root.focus_set()
-        if self._persist_tasks() and not silent:
-            self._set_status("任务已保存")
-            self.show_toast("任务已保存")
+        saved = self._persist_tasks()
+        if not silent:
+            if saved:
+                self._set_status("任务已保存")
+                self.show_toast("任务已保存")
+            else:
+                self.show_toast("任务保存失败：磁盘写入异常", kind="error")
 
     def export_task(self) -> None:
         """把当前选中任务导出为 .json，用户自选保存位置。"""
@@ -1984,6 +2062,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
 
     def import_task(self) -> None:
         """从 .json 导入任务，追加到任务列表末尾。"""
+        if self.running or self.recording:
+            self._set_status("运行或录制中，停止后才能导入任务")
+            return
+        self.save_task(silent=True)  # 切走前先把当前编辑落盘
         path = filedialog.askopenfilename(
             filetypes=[("点点任务", "*.json")],
             title="导入任务",
@@ -2704,8 +2786,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self.save_task(silent=True)
         self.tasks.append(Task(name=f"任务 {len(self.tasks) + 1}"))
         self.active_index = len(self.tasks) - 1
+        self._persist_tasks()  # 立即落盘：崩溃不应丢掉新建的任务
         self._render_task_list()
         self._load_active_task()
+        self._set_status("已新建任务")
 
     def duplicate_task(self) -> None:
         if not self._editing_allowed():
@@ -2733,8 +2817,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             self.tasks.append(placeholder)
         self.active_index = min(index, len(self.tasks) - 1)
         # 先落回收站再写 tasks.json：任一步失败，任务都至少还存在于一份文件中
-        self._persist_trash()
-        self._persist_tasks()
+        saved = self._persist_trash() and self._persist_tasks()
         self._render_task_list()
         self._load_active_task()
 
@@ -2757,7 +2840,17 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             self._load_active_task()
             self._set_status("已恢复任务")
 
-        self.show_toast(f"已删除“{task.name}”", action=undo)
+        if saved:
+            self.show_toast(f"已删除“{task.name}”", action=undo)
+        else:
+            # 落盘失败必须如实告知：静默成功会让用户误以为任务已进回收站
+            self.show_toast("删除未完成：磁盘写入失败，任务已还原", kind="error")
+            self.trash.remove(task)
+            task.deleted_at = None
+            self.tasks.insert(index, task)
+            self.active_index = min(index, len(self.tasks) - 1)
+            self._render_task_list()
+            self._load_active_task()
 
     def show_trash(self) -> None:
         if self.running:
@@ -2802,8 +2895,17 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             self.tasks.append(task)
             self._persist_tasks()
             self._persist_trash()
+            self.active_index = len(self.tasks) - 1
             self._render_task_list()
+            self._load_active_task()
             refresh()
+            message = f"已恢复“{task.name}”，任务已添加到列表末尾"
+            # 删除任务期间其定时计划会被自动停用，恢复时提醒用户重新启用
+            related = [s for s in self.schedules if s.task_id == task.id]
+            if related and not any(s.enabled for s in related):
+                message += "；其定时计划已停用，可在定时任务中重新启用"
+            self._set_status(message)
+            self.show_toast(message)
 
         def purge_items(targets: list) -> None:
             """批量永久删除：先落盘成功再清理模板文件，失败按原位置回滚内存列表。"""
@@ -2876,6 +2978,8 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             self._reschedule(self._poll_hotkeys, 15)
 
     def _emergency_stop(self) -> None:
+        if self.capture_armed:
+            self.cancel_capture()  # 捕获浮层承诺的「Esc 取消」
         if self.recording:
             self._stop_recording()
         if self.running:
@@ -2884,7 +2988,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
     def _refresh_cursor_readout(self) -> None:
         try:
             if self.capture_armed:
-                self._set_status("移动鼠标到目标位置，按 F2 捕获")
+                message = "移动鼠标到目标位置，按 F2 捕获"
+                # 同文案不重复写入：避免待命提示每 500ms 刷掉状态历史里的其他事件
+                if self.status_label.cget("text") != f"●  {message}":
+                    self._set_status(message)
         finally:
             self._reschedule(self._refresh_cursor_readout, 500)
 
@@ -2970,6 +3077,16 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
                 pass
 
     def _overlay_geometry(self, width: int, height: int) -> str:
+        """悬浮条落在主窗口所在显示器底部居中；多显示器时跟随主窗口而不是永远在主屏。"""
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        work_area = monitor_workarea_at(
+            root_x + self.root.winfo_width() // 2, root_y + self.root.winfo_height() // 2
+        )
+        if work_area is not None:
+            work_x, work_y, work_width, work_height = work_area
+            x = work_x + max(0, (work_width - width) // 2)
+            y = work_y + max(0, work_height - height - S(48))
+            return f"{width}x{height}+{x}+{y}"
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         return f"{width}x{height}+{max(S(18), (screen_width - width) // 2)}+{max(S(18), screen_height - height - S(48))}"
@@ -2998,6 +3115,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         overlay.update_idletasks()
         self.run_overlay = overlay
         self.run_overlay_handle = int(USER32.GetAncestor(overlay.winfo_id(), 2) or overlay.winfo_id())
+        self.window_coordinator.remember_state()
         self.root.withdraw()
         overlay.lift()
 
@@ -3020,6 +3138,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         overlay.update_idletasks()
         self.record_overlay = overlay
         self.record_overlay_handle = int(USER32.GetAncestor(overlay.winfo_id(), 2) or overlay.winfo_id())
+        self.window_coordinator.remember_state()
         self.root.withdraw()
         overlay.lift()
 
@@ -3113,6 +3232,7 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self.close()
 
     def _minimize_to_tray(self) -> None:
+        self.window_coordinator.remember_state()
         self.root.withdraw()
         self._tray_hidden = True
         self.show_toast("点点已最小化到托盘，定时任务继续执行")

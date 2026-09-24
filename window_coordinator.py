@@ -29,6 +29,7 @@ class WindowCoordinator:
             self.resize_throttle: ResizeThrottle | None = ResizeThrottle(self.root_window_handle)
         except OSError:
             self.resize_throttle = None
+        self.pre_hide_state = "normal"
 
     def freeze_paint(self) -> None:
         USER32.SendMessageW(self.root_window_handle, WM_SETREDRAW, 0, 0)
@@ -42,14 +43,26 @@ class WindowCoordinator:
             RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         )
 
+    def remember_state(self) -> None:
+        """主窗口隐藏前记录当前窗口状态，恢复时不再无条件强制最大化。"""
+        try:
+            self.pre_hide_state = self.root.state()
+        except tk.TclError:
+            self.pre_hide_state = "normal"
+
     def restore_main_window(self) -> None:
-        """在冻结期间完成状态切换，避免 deiconify→zoomed 的中间黑帧。"""
+        """在冻结期间完成状态切换，避免 deiconify→zoomed 的中间黑帧。
+
+        只在隐藏前本就是最大化时才回到最大化，普通尺寸窗口恢复原状态。
+        """
         self.freeze_paint()
         try:
-            self.root.state("zoomed")
+            was_zoomed = self.pre_hide_state == "zoomed"
             self.root.deiconify()
-            if self.root.state() != "zoomed":
+            if was_zoomed:
                 self.root.state("zoomed")
+                if self.root.state() != "zoomed":
+                    self.root.state("zoomed")
             self.root.update_idletasks()
             self.root.lift()
             self.root.focus_force()
