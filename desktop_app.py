@@ -113,6 +113,8 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         self._restore_window_placement()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Map>", self._on_window_restore)
+        # 点外失焦：点击主窗口非输入区域时把焦点交还给根窗口（add 叠加不干扰既有绑定）
+        self.root.bind("<Button-1>", self._dismiss_entry_focus, add="+")
         self.thumbs_dir = self.app_data_dir / "thumbs"
         self.thumbs_dir.mkdir(parents=True, exist_ok=True)
         self.tasks = self.repository.load_tasks()
@@ -661,7 +663,10 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         form = tk.Frame(body, bg=CARD_BG)
         form.pack(fill="x", padx=SP_XL, pady=(SP_LG, SP_XL))
         self._field_label(form, "任务名称", "任务在左侧列表中的显示名称，最多 20 个字符。")
-        TextField(form, self.task_name_var, width=S(378), height=H_XL, maxlength=20).pack(pady=(0, SP_MD))
+        self.name_field = TextField(form, self.task_name_var, width=S(378), height=H_XL, maxlength=20)
+        self.name_field.pack(pady=(0, SP_MD))
+        # 回车即保存：名称是高频改动，边输入边找右上角保存按钮的反人类操作必须避免
+        self.name_field.entry.bind("<Return>", lambda _event: self.save_task())
         self._field_label(form, "鼠标动作", "每次点击使用的鼠标按键：\n· 左键单击：最常用，适用绝大多数场景\n· 右键单击：触发目标的右键菜单\n· 中键单击：按下鼠标滚轮，较少使用")
         Select(form, self.button_var, ("左键单击", "右键单击", "中键单击"), width=S(378), height=H_XL, icon="cursor", command=self._button_changed).pack(pady=(0, SP_MD))
         self._field_label(form, "点击方式", "点击位置的定位方式：\n· 窗口相对：目标窗口移动后，点击位置自动跟随窗口；跨程序任务会在每步执行前自动切换到目标窗口\n· 屏幕坐标：始终点击屏幕上的固定位置，不做窗口切换")
@@ -815,6 +820,12 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
             self.readout_coord.configure(text=f"{self.target.x}, {self.target.y}")
             self.readout_window.configure(text=self.target.title[:14])
             self._preview_point = (self.target.x, self.target.y, f"{self.target.x}, {self.target.y}")
+            # 截图从缓存/磁盘复原：模式往返或重启后预览不丢
+            if self.target.id not in self._step_thumbs:
+                loaded = self._load_thumb(self.target.id)
+                if loaded is not None:
+                    self._remember_thumb(self.target.id, loaded)
+            self._screen_thumb = self._step_thumbs.get(self.target.id)
         else:
             self.readout_coord.configure(text="—")
             self.readout_window.configure(text="—")
@@ -1360,12 +1371,13 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
                 self._restore_main_window()
             self._thumb_render_size = None
             captured_thumb = self._screen_thumb
+            if captured_thumb is not None:
+                # 单点目标的截图同样入缓存与磁盘：模式往返、重启后预览才能复原
+                self._remember_thumb(self.target.id, captured_thumb)
+                self._save_thumb(self.target.id, captured_thumb)
             self._render_target()
             if self.mode_var.get() in {"多点任务", "录制操作"}:
                 self.steps.append(self.target)
-                if captured_thumb is not None:
-                    self._remember_thumb(self.target.id, captured_thumb)
-                    self._save_thumb(self.target.id, captured_thumb)
                 self._render_steps()
             self.save_task(silent=True)
             self._set_status(f"已捕获 {x}, {y}")
@@ -1941,6 +1953,9 @@ class DesktopClicker(CanvasPaintingMixin, DialogsMixin, ToastMixin):
         # 全量重建几十个按钮控件的开销只在名称真正变化时才有必要
         if self._task_list_fingerprint() != self._task_list_signature:
             self._render_task_list()
+        if not silent:
+            # 显式保存（按钮/回车）后把焦点移出输入框，避免光标一直留在名称框
+            self.root.focus_set()
         if self._persist_tasks() and not silent:
             self._set_status("任务已保存")
             self.show_toast("任务已保存")
