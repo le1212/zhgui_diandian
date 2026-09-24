@@ -143,6 +143,17 @@ USER32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 USER32.ShowWindow.restype = wintypes.BOOL
 USER32.SetForegroundWindow.argtypes = [wintypes.HWND]
 USER32.SetForegroundWindow.restype = wintypes.BOOL
+USER32.IsIconic.argtypes = [wintypes.HWND]
+USER32.IsIconic.restype = wintypes.BOOL
+USER32.GetForegroundWindow.argtypes = []
+USER32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+USER32.GetWindowThreadProcessId.restype = wintypes.DWORD
+USER32.BringWindowToTop.argtypes = [wintypes.HWND]
+USER32.BringWindowToTop.restype = wintypes.BOOL
+USER32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+USER32.AttachThreadInput.restype = wintypes.BOOL
+KERNEL32.GetCurrentThreadId.argtypes = []
+KERNEL32.GetCurrentThreadId.restype = wintypes.DWORD
 KERNEL32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
 KERNEL32.CreateMutexW.restype = wintypes.HANDLE
 KERNEL32.ReleaseMutex.argtypes = [wintypes.HANDLE]
@@ -187,6 +198,56 @@ def activate_window_by_title(title: str) -> bool:
     USER32.ShowWindow(hwnd, SW_RESTORE)
     USER32.SetForegroundWindow(hwnd)
     return True
+
+
+def find_window_by_title(title: str) -> int:
+    """按窗口标题精确查找顶层窗口句柄；找不到返回 0。用于目标窗口被重建后的找回。"""
+    if not title:
+        return 0
+    return int(USER32.FindWindowW(None, title) or 0)
+
+
+def _force_foreground(hwnd: int) -> None:
+    """SetForegroundWindow 被前台锁拒绝时的标准解法：
+    把当前线程临时附到前台窗口与目标窗口的输入队列再调用，完成后必须分离。"""
+    foreground = USER32.GetForegroundWindow()
+    this_thread = KERNEL32.GetCurrentThreadId()
+    target_thread = USER32.GetWindowThreadProcessId(hwnd, None)
+    attached: list[int] = []
+    try:
+        if foreground:
+            foreground_thread = USER32.GetWindowThreadProcessId(foreground, None)
+            if foreground_thread and foreground_thread != this_thread and USER32.AttachThreadInput(this_thread, foreground_thread, True):
+                attached.append(foreground_thread)
+        if target_thread and target_thread != this_thread and USER32.AttachThreadInput(this_thread, target_thread, True):
+            attached.append(target_thread)
+        USER32.BringWindowToTop(hwnd)
+        USER32.SetForegroundWindow(hwnd)
+    finally:
+        for thread in attached:
+            USER32.AttachThreadInput(this_thread, thread, False)
+
+
+def activate_window(hwnd: int, timeout_ms: int = 1500) -> bool:
+    """把目标窗口切到前台，跨程序任务的调度核心。
+
+    最小化的窗口先还原；SetForegroundWindow 失败（前台锁）时用线程附加强切；
+    最后轮询确认前台确实到达目标窗口——点击注入落在屏幕坐标上，
+    前台不对就会点进别的窗口，所以必须验证而不是发完就算。
+    """
+    if not hwnd or not USER32.IsWindow(hwnd):
+        return False
+    if USER32.IsIconic(hwnd):
+        USER32.ShowWindow(hwnd, SW_RESTORE)
+    deadline = time.monotonic() + max(0, timeout_ms) / 1000
+    while True:
+        if USER32.GetForegroundWindow() == hwnd:
+            return True
+        if not USER32.SetForegroundWindow(hwnd):
+            _force_foreground(hwnd)
+        if time.monotonic() >= deadline:
+            return USER32.GetForegroundWindow() == hwnd
+        time.sleep(0.025)
 
 
 def enable_per_monitor_dpi_awareness() -> None:

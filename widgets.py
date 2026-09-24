@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageTk
 
-from theme import color as theme_color
+from theme import THEME_NAME, color as theme_color
 from winapi import SCALE, USER32, VK_LBUTTON
 
 FONT = "Microsoft YaHei UI"
@@ -26,6 +26,7 @@ INK_STRONG = theme_color("ink_strong")
 INK_SOFT = theme_color("ink_soft")
 GRAY = theme_color("gray")
 ON_COLOR_FG = theme_color("on_color_fg")
+ON_AMBER = theme_color("on_amber")
 GREEN = theme_color("green")
 GREEN_HOVER = theme_color("green_hover")
 GREEN_TEXT = theme_color("green_text")
@@ -34,6 +35,12 @@ GREEN_BRIGHT = theme_color("green_bright")
 SIDEBAR_BG = theme_color("sidebar_bg")
 MAIN_BG = theme_color("main_bg")
 HEADER_BG = theme_color("header_bg")
+COMMAND_FG = theme_color("command_fg")
+COMMAND_MUTED = theme_color("command_muted")
+COMMAND_SLAB = theme_color("command_slab")
+COMMAND_HOVER = theme_color("command_hover")
+COMMAND_BORDER = theme_color("command_border")
+COMMAND_DANGER = theme_color("command_danger")
 CARD_BG = theme_color("card_bg")
 PANEL_BG = theme_color("panel_bg")
 LIST_BG = theme_color("list_bg")
@@ -42,6 +49,9 @@ BORDER = theme_color("border")
 FIELD_BORDER = theme_color("field_border")
 PILL_ACTIVE = theme_color("pill_active")
 BORDER_SOFT = theme_color("border_soft")
+HERO_SINGLE = theme_color("hero_single")
+HERO_MULTI = theme_color("hero_multi")
+HERO_RECORD = theme_color("hero_record")
 NEUTRAL_HOVER = theme_color("neutral_hover")
 SUBTLE_BG = theme_color("subtle_bg")
 SUBTLE_HOVER = theme_color("subtle_hover")
@@ -78,6 +88,25 @@ SHADOW_2 = theme_color("shadow_2")
 def S(value: float) -> int:
     """按系统 DPI 缩放界面尺寸。"""
     return round(value * SCALE)
+
+
+# 组件高度阶梯：按钮与输入框只允许这五档，同排控件必须同档（不要引入第六档）
+H_XS = S(26)  # 紧凑步进器
+H_SM = S(30)  # 次级小按钮（主题切换、任务卡操作行、开机自启）
+H_MD = S(32)  # 工具条迷你按钮
+H_LG = S(36)  # 标准按钮：主工具栏、对话框按钮、任务列表行
+H_XL = S(40)  # 大按钮与输入框：主行动、设置表单、侧栏任务条目
+
+# 间距阶梯：对齐 DESIGN.md 的 spacing token 表，布局层 pady/padx 只允许这些档位。
+# 离档旧值按就近收敛（同距取更小档，贴合文档的"面板拼接密度"）；
+# S(1) 是唯一例外——基线对齐用的发丝量，保留字面量不设档。
+SP_XXS = S(2)
+SP_XS = S(4)
+SP_SM = S(8)
+SP_MD = S(12)
+SP_LG = S(16)
+SP_XL = S(24)
+SP_XXL = S(32)
 
 
 def F(size: float, *styles: str) -> tuple:
@@ -130,6 +159,18 @@ def rounded_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, 
         x1, y1 + radius, x1, y1,
     )
     return canvas.create_polygon(points, smooth=True, fill=fill, **kw)
+
+
+def chamfered_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, cut: float, fill: str = "", **kw):
+    """45° 切角八边形（DESIGN.md 的 faceplate 几何）：角是切割出来的，不是倒圆的。"""
+    cut = max(0.0, min(cut, (x2 - x1) / 2, (y2 - y1) / 2))
+    points = (
+        x1 + cut, y1, x2 - cut, y1,
+        x2, y1 + cut, x2, y2 - cut,
+        x2 - cut, y2, x1 + cut, y2,
+        x1, y2 - cut, x1, y1 + cut,
+    )
+    return canvas.create_polygon(points, fill=fill, **kw)
 
 
 def paint_icon(canvas: tk.Canvas, name: str, cx: float, cy: float, size: float, color: str, bg: str = CARD_BG) -> None:
@@ -188,6 +229,10 @@ def _render_icon_image(name: str, color: str, size: int, bg: str = CARD_BG) -> I
         draw.ellipse(R(0.44, 0.44, 0.56, 0.56), fill=color)
     elif name == "play":
         draw.polygon(P([(0.32, 0.14), (0.84, 0.5), (0.32, 0.86)]), fill=color)
+    elif name == "power":
+        # 顶部留缺口的圆环 + 竖线：标准电源符号，缺口容纳竖线
+        draw.arc(R(0.18, 0.22, 0.82, 0.86), start=300, end=240, fill=color, width=sw)
+        draw.line(P([(0.5, 0.08), (0.5, 0.5)]), fill=color, width=sw)
     elif name == "floppy":
         draw.rounded_rectangle(R(0.12, 0.08, 0.88, 0.92), radius=0.1 * big, outline=color, width=sw)
         draw.rounded_rectangle(R(0.3, 0.08, 0.7, 0.38), radius=0.06 * big, fill=color)
@@ -196,6 +241,9 @@ def _render_icon_image(name: str, color: str, size: int, bg: str = CARD_BG) -> I
         up = name == "chevron-up"
         pts = [(0.24, 0.64 if up else 0.36), (0.5, 0.36 if up else 0.64), (0.76, 0.64 if up else 0.36)]
         draw.line(P(pts), fill=color, width=sw, joint="curve")
+    elif name == "chevron-right":
+        # 前进箭头（DESIGN.md button-arrow-chip 语义）：行尾"可进入/可前进"的指向
+        draw.line(P([(0.36, 0.26), (0.62, 0.5), (0.36, 0.74)]), fill=color, width=sw, joint="curve")
     elif name == "plus":
         draw.line(P([(0.5, 0.18), (0.5, 0.82)]), fill=color, width=sw)
         draw.line(P([(0.18, 0.5), (0.82, 0.5)]), fill=color, width=sw)
@@ -283,11 +331,17 @@ def brand_icon_image(size: int = 256) -> Image.Image:
 
 
 class PillButton(tk.Canvas):
-    """圆角按钮：支持图标、悬停、禁用与运行中改写文本/配色。"""
+    """圆角按钮：支持图标、悬停、按压、禁用与运行中改写文本/配色。
+
+    圆角两档纪律：紧凑按钮（高度 ≤38）用 S(8)，标准按钮（高度 ≥40）用 S(10)，
+    不要引入第三档——形状统一是整套界面的秩序来源之一。
+    按压态 = 底色整体压深一档（DESIGN.md button-primary-pressed 语义），瞬时切换不加动画。
+    """
 
     def __init__(self, master, text: str, command=None, *, width, height, radius=10,
                  bg=CARD_BG, fg=INK, border=None, hover_bg=None, icon=None,
-                 icon_color=None, font=None, align="center", padx=18, trailing=None, icon_size=None):
+                 icon_color=None, font=None, align="center", padx=18, trailing=None,
+                 trailing_color=None, icon_size=None):
         self.command = command
         self._width = width
         self._height = height
@@ -304,8 +358,10 @@ class PillButton(tk.Canvas):
         self._align = align
         self._padx = padx
         self._trailing = trailing
+        self._trailing_color = trailing_color or ICON_MUTED
         self._state = "normal"
         self._hover = False
+        self._pressed = False
         self._hover_progress = 0.0
         self._hover_job = None
         self._focused = False
@@ -313,7 +369,10 @@ class PillButton(tk.Canvas):
         self._render()
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
-        self.bind("<Button-1>", self._on_click)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        # Button-1 与 ButtonPress-1 是同一事件模式，直接 bind 会覆盖上面的按压视觉，必须 add 叠加
+        self.bind("<Button-1>", self._on_click, add="+")
         self.bind("<FocusIn>", lambda _e: self._set_focused(True))
         self.bind("<FocusOut>", lambda _e: self._set_focused(False))
         for keys in ("<Return>", "<KP_Enter>", "<space>"):
@@ -331,6 +390,9 @@ class PillButton(tk.Canvas):
         w, h = self._width, self._height
         enabled = self._state == "normal"
         bg = mix(self._bg, self._hover_bg, self._hover_progress) if enabled else self._bg
+        if self._pressed and enabled:
+            # 按压态优先于悬停：底色压深一档，物理"按下"反馈
+            bg = shade(self._bg, 0.85)
         if self._border:
             rounded_rect(self, 0, 0, w - 1, h - 1, self.radius, fill=self._border, outline="")
             rounded_rect(self, 1, 1, w - 2, h - 2, max(2, self.radius - 1), fill=bg, outline="")
@@ -344,7 +406,7 @@ class PillButton(tk.Canvas):
             x += self._icon_size + S(8)
         self.create_text(x, h / 2, text=self._text, anchor="w", fill=fg, font=self._font)
         if self._trailing:
-            paint_icon(self, self._trailing, w - S(20), h / 2, S(14), ICON_MUTED, bg)
+            paint_icon(self, self._trailing, w - S(20), h / 2, S(14), self._trailing_color, bg)
         if self._focused:
             rounded_rect(self, 1, 1, w - 2, h - 2, self.radius, outline=GREEN_DEEP, width=S(2))
 
@@ -354,6 +416,8 @@ class PillButton(tk.Canvas):
 
     def _on_enter(self, _event) -> None:
         self._hover = True
+        # 模态弹窗可能吞掉过 ButtonRelease 使按压态残留，鼠标重新进入时复位
+        self._pressed = False
         self._animate_hover(1.0)
 
     def _on_leave(self, _event) -> None:
@@ -375,17 +439,36 @@ class PillButton(tk.Canvas):
             self._hover_job = self.after(20, lambda: self._animate_hover(target))
 
     def _on_click(self, _event) -> None:
+        # 命令在按下阶段执行；按压态保持到物理释放（_on_release），不在此复位——
+        # 命令打开模态弹窗时 grab 会吞掉释放事件，残留由 _on_enter 复位兜底
         if self._state == "normal" and self.command:
             self.command()
+
+    def _on_press(self, _event=None) -> None:
+        if self._state == "normal" and not self._pressed:
+            self._pressed = True
+            self._render()
+
+    def _on_release(self, _event=None) -> None:
+        if not self._pressed:
+            return
+        self._pressed = False
+        # 命令可能销毁按钮（如对话框的确定键），销毁后不再重绘
+        if self.winfo_exists():
+            self._render()
 
     def _set_focused(self, focused: bool) -> None:
         self._focused = focused
         self._render()
 
     def _activate(self, _event=None) -> str:
-        """键盘（回车/空格）触发，与鼠标点击同语义。"""
-        if self._state == "normal" and self.command:
-            self.command()
+        """键盘（回车/空格）触发，与鼠标点击同语义；闪一下按压态给出反馈。"""
+        if self._state == "normal":
+            self._on_press()
+            # 先调度回弹再执行命令：命令可能销毁按钮（如对话框的确定键）
+            self.after(90, self._on_release)
+            if self.command:
+                self.command()
         return "break"
 
     def configure(self, cnf=None, **kw):
@@ -1100,15 +1183,21 @@ class HelpIcon(tk.Canvas):
 
 
 class RoundedCard(tk.Canvas):
-    """圆角卡片容器，body 为内容框架；带向下偏移的柔和投影与 1.5px 发丝边框。"""
+    """面板卡片容器，body 为内容框架。
 
-    def __init__(self, master, *, width=None, height=None, radius=20, bg=CARD_BG, border=BORDER, shadow=True):
+    深度语言源自 DESIGN.md 的"注塑面板"：不用模糊柔影，而是 plate 斜面——
+    顶部 1px 亮边、1.5px 发丝描边、底部 2px 硬阴影线（浅色主题带 chrome-indigo 色味）。
+    chamfer 非 None 时四角 45° 切角（直角切割而非倒圆），按文档只用于最大的面板。
+    """
+
+    def __init__(self, master, *, width=None, height=None, radius=10, bg=CARD_BG, border=BORDER, shadow=True, chamfer=None):
         super().__init__(master, width=width or 10, height=height or 10, bg=master["bg"], highlightthickness=0, bd=0)
         self.radius = radius
         self._bg = bg
         self._border = border
         self._shadow = shadow
-        self._margin = S(6) if shadow else 0
+        self._chamfer = chamfer
+        self._margin = S(4) if shadow else 0
         self._last_layout: tuple[int, int] | None = None
         self.body = tk.Frame(self, bg=bg)
         self._window = self.create_window(1, 1, window=self.body, anchor="nw")
@@ -1117,13 +1206,21 @@ class RoundedCard(tk.Canvas):
         self.bind("<Expose>", lambda e: self._schedule_relayout())
 
     def _schedule_relayout(self, _event=None) -> None:
-        """缩放时合并高频 <Configure>，延迟重画圆角与阴影，避免连续 delete/create 卡顿。"""
+        """缩放时合并高频 <Configure>，延迟重画面板，避免连续 delete/create 卡顿。"""
         if self._relayout_job:
             try:
                 self.after_cancel(self._relayout_job)
             except tk.TclError:
                 pass
         self._relayout_job = self.after(80, self._relayout)
+
+    def _plate(self, x1: float, y1: float, x2: float, y2: float, fill: str, inset: float = 0.0) -> None:
+        """按面板几何（切角或圆角）画一层实心板，inset 为四边向内收缩量。"""
+        if self._chamfer is not None:
+            cut = max(2.0, self._chamfer - inset)
+            chamfered_rect(self, x1 + inset, y1 + inset, x2 - inset, y2 - inset, cut, fill=fill, outline="", tags="card")
+        else:
+            rounded_rect(self, x1 + inset, y1 + inset, x2 - inset, y2 - inset, max(2, self.radius - inset), fill=fill, outline="", tags="card")
 
     def _relayout(self, _event=None) -> None:
         self._relayout_job = None
@@ -1134,18 +1231,19 @@ class RoundedCard(tk.Canvas):
         self._last_layout = (w, h)
         self.delete("card")
         m = self._margin
-        ground = self["bg"]
-        if self._shadow:
-            # 投影向下方偏移，逐层加深，模拟海拔；上左右只露出细微边缘
-            rounded_rect(self, m - 2, m, w - m + 2, h - m + 3, self.radius + 2, fill=mix(ground, BORDER_SOFT, 0.10), outline="", tags="card")
-            rounded_rect(self, m - 1, m + 1, w - m + 1, h - m + 5, self.radius + 1, fill=mix(ground, BORDER_SOFT, 0.16), outline="", tags="card")
-            rounded_rect(self, m, m + 2, w - m, h - m + 7, self.radius, fill=mix(ground, BORDER_SOFT, 0.22), outline="", tags="card")
         ring = max(1, round(S(1.5)))
-        rounded_rect(self, m, m, w - m, h - m, self.radius, fill=self._border, outline="", tags="card")
-        rounded_rect(self, m + ring, m + ring, w - m - ring, h - m - ring, max(2, self.radius - ring), fill=self._bg, outline="", tags="card")
+        if self._shadow:
+            ground = self["bg"]
+            # 底部硬阴影线：整板下移 2px 的实心暗板，只从底沿露出（无模糊）
+            shadow_tint = INK_SOFT if THEME_NAME == "light" else "#000000"
+            self._plate(m, m + 1 + S(2), w - m, h - m + 1 + S(2), mix(ground, shadow_tint, 0.45))
+            # 顶边高光：先铺亮色板体，叠上 1px 下移的描边板后只剩顶端露出 1px 亮边
+            self._plate(m, m, w - m, h - m, mix(self._bg, "#ffffff", 0.45))
+        self._plate(m, m + 1, w - m, h - m + 1, self._border)
+        self._plate(m, m + 1, w - m, h - m + 1, self._bg, inset=ring)
         self.tag_lower("card")
-        self.coords(self._window, m + ring, m + ring)
-        self.itemconfigure(self._window, width=w - 2 * m - 2 * ring, height=h - 2 * m - 2 * ring)
+        self.coords(self._window, m + ring, m + 1 + ring)
+        self.itemconfigure(self._window, width=w - 2 * m - 2 * ring, height=h - 2 * m - 2 * ring - 1)
 
 
 class ThinScrollbar(tk.Canvas):
