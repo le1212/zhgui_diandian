@@ -139,6 +139,19 @@ h2 {
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
+/* ===== Hero 入场：与星尘汇聚同步的错峰上浮 =====
+   backwards 让各元素在延迟期内保持首帧隐藏；scroll-hint 由下方自身规则覆盖 */
+.hero > * {
+  animation: rise-in 0.7s cubic-bezier(0.22, 0.61, 0.36, 1) backwards;
+}
+.hero > :nth-child(1) { animation-delay: 0.15s; }
+.hero > :nth-child(2) { animation-delay: 0.3s; }
+.hero > :nth-child(3) { animation-delay: 0.5s; }
+.hero > :nth-child(4) { animation-delay: 0.65s; }
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .hero-cta {
   margin-top: 40px;
   display: flex;
@@ -163,11 +176,18 @@ h2 {
   color: #475569;
   font-size: 12px;
   letter-spacing: 2px;
-  animation: float 2.5s ease-in-out infinite;
+  /* 先随错峰节奏淡入上浮（保持水平居中），落幕再交给原有的上下浮动 */
+  animation:
+    hint-in 0.7s cubic-bezier(0.22, 0.61, 0.36, 1) 1.1s backwards,
+    float 2.5s ease-in-out 1.8s infinite;
 }
 @keyframes float {
   0%, 100% { transform: translate(-50%, 0); }
   50% { transform: translate(-50%, 8px); }
+}
+@keyframes hint-in {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
 }
 
 /* ===== 能力卡片 ===== */
@@ -391,9 +411,9 @@ footer {
   .keys-row { grid-template-columns: 1fr; }
 }
 
-/* 减少动态效果偏好：星系静态成形，内容直接呈现 */
+/* 减少动态效果偏好：星系静态成形、跳过开场汇聚，内容直接呈现 */
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .reveal { opacity: 1; transform: none; transition: none; }
-  .scroll-hint { animation: none; }
+  .hero > * { animation: none; }
 }

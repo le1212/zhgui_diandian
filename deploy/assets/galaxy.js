@@ -1,4 +1,6 @@
 // ===== 星河引擎（原创实现，无第三方依赖） =====
+// 进入页面先播「星尘汇聚」开场：星尘暗淡铺底呼吸，再沿弧线卷入成星系；
+// 开场中滚动则 0.4 秒快速收尾，深链进入（首屏不在顶部）直接跳过；
 // 固定种子星种：hero 处聚成圆形螺旋星系，三成星种常驻全屏铺底填补四角，
 // 滚动散作整页星野，同一组星种每次都落回原处；
 // 辉光精灵 + 加色混合绘制；流星随机掠过；标签页隐藏暂停；
@@ -28,6 +30,14 @@
   var morph = 0;           // 0 = 星系成形，1 = 散作星野
   var par = { x: 0, y: 0 };    // 视差平滑值（归一化 -0.5 ~ 0.5）
   var nextMeteorAt = 0;
+
+  // 首屏「星尘汇聚」开场：星尘暗淡铺底呼吸，再沿弧线卷入成星系
+  var introActive = false;
+  var introAt = 0;          // 开场起点时刻
+  var introRaw = 0;         // 开场整体进度（0~1，含前段静置呼吸）
+  var introCore = 1;        // 星核辉光淡入系数；未播开场时视作已点亮
+  var INTRO_DUR = 2400;     // 开场总时长（小屏在 startIntro 缩短）
+  var INTRO_BREATHE = 0.22; // 前段静置呼吸占比，其后开始汇聚
 
   // 首屏聚形轮播：静置后打散汇聚成字形，到点或滚动时打散出场
   var shapes = [];             // 每项为 { pts: 点云, cx/cy: 字形中心 }
@@ -157,7 +167,7 @@
       if (ambient) {
         gx = rand() * width;
         gy = rand() * height;
-        r = 0.4 + rand() * 1.0;
+        r = 0.5 + rand() * 1.25;
         alpha = 0.25 + rand() * 0.45;
       } else {
         var isCore = rand() < 0.14;
@@ -184,7 +194,7 @@
         gx = cx + Math.cos(theta) * radius + gauss(rand) * spread;
         gy = cy + Math.sin(theta) * radius + gauss(rand) * spread;
         // 星系粒子纤细，细星点叠加出丝绢质感（环境星粗细见 frame 里的贴图分档）
-        r = isCore ? 0.8 + rand() * 1.2 : 0.35 + Math.pow(rand(), 2) * 1.7;
+        r = isCore ? 1.0 + rand() * 1.4 : 0.45 + Math.pow(rand(), 2) * 2.0;
         alpha = 0.35 + rand() * 0.65;
       }
 
@@ -247,6 +257,8 @@
     buildParticles();
     // 减动效没有聚形轮播，不必付出离屏采样成本
     if (!reduceMotion) buildShapes();
+    // 开场进行中重建：按新视口重算汇聚控制点，飞行路径不落回默认中心
+    if (introActive) buildIntroCurves();
 
     // 尺寸变了：字形点位全部失效，正在展示的内容直接散回星系态
     if (shapeState >= 0 || shapePhase !== 'none') {
@@ -431,6 +443,38 @@
     }
 
     scatterOut(now);
+  }
+
+  // 汇聚控制点：星野起点绕星系中心外卷一段弧（方向与星系自旋一致），
+  // 飞行轨迹呈卷入式弧线；复用聚形的 wx/wy 字段，轮播启用时会覆盖
+  function buildIntroCurves() {
+    var center = galaxyCenter();
+    var cx = center.x;
+    var cy = center.y;
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      var ang = 0.6 + p.flare * 1.1;
+      var cosA = Math.cos(ang);
+      var sinA = Math.sin(ang);
+      var dsx = p.fx - cx;
+      var dsy = p.fy - cy;
+      p.wx = cx + (dsx * cosA - dsy * sinA) * 0.9;
+      p.wy = cy + (dsx * sinA + dsy * cosA) * 0.9;
+    }
+  }
+
+  // 进入页面：星尘先暗淡呼吸再卷入成星系；深链/带锚点进入（浏览器即将跳离首屏）直接跳过
+  function startIntro(now) {
+    if (location.hash || window.scrollY > window.innerHeight * 0.12) return;
+
+    INTRO_DUR = isSmall ? 1800 : 2400;
+    introActive = true;
+    introAt = now;
+    introCore = 0;
+    buildIntroCurves();
+    // 聚形轮播与流星都等开场落幕再登场，避免抢戏
+    nextShapeAt = now + INTRO_DUR + GALAXY_HOLD;
+    nextMeteorAt = now + INTRO_DUR + 900;
   }
 
   // 首屏聚形轮播状态机
@@ -627,6 +671,24 @@
     morph += (target - morph) * 0.08;
     var e = easeInOut(morph);
 
+    // 星尘汇聚开场：推进整体进度；开场中开始滚动则把剩余路程压进 0.4 秒收尾
+    var introA = 1;
+    if (introActive) {
+      if (target > 0.02 && INTRO_DUR - (now - introAt) > 450) {
+        introAt = now - INTRO_DUR + 400;
+      }
+      introRaw = (now - introAt) / INTRO_DUR;
+      if (introRaw >= 1) {
+        introActive = false;
+        introRaw = 1;
+        introCore = 1;
+      } else {
+        introCore = Math.min(1, Math.max(0, (introRaw - 0.6) / 0.4));
+        // 呼吸段暗淡铺底，汇聚开始后随整体进度点亮
+        introA = 0.3 + 0.7 * Math.min(1, Math.max(0, (introRaw - 0.12) / 0.66));
+      }
+    }
+
     // 指针位置缓动跟随；快速移动时沉淀拖尾采样点。
     // 残余距离不足 1px 时直接贴合，保证静止时力场/高亮与光标严格对位
     var pdx = pointer.tx - pointer.x;
@@ -720,6 +782,14 @@
       var bx = x;
       var by = y;
 
+      // 星尘汇聚开场：起点为实时星野位置，沿外卷控制点飞向星系实时位置
+      if (introActive) {
+        var prog = staggerK((introRaw - INTRO_BREATHE) / (1 - INTRO_BREATHE), p.delay);
+        var inv = 1 - prog;
+        x = inv * inv * fx + 2 * inv * prog * p.wx + prog * prog * bx;
+        y = inv * inv * fy + 2 * inv * prog * p.wy + prog * prog * by;
+      }
+
       // 聚形时间线：入场汇聚 / 停留 / 打散出场共用逐粒子错峰贝塞尔路径
       // 环境星不参与，始终铺满全屏
       if (!p.ambient && (shapeState >= 0 || shapePhase !== 'none')) {
@@ -748,7 +818,7 @@
       y += p.oy;
 
       var twinkle = 0.55 + 0.45 * Math.sin(t * p.speed + p.phase);
-      var alpha = p.alpha * twinkle * (1 - e * 0.35);
+      var alpha = p.alpha * twinkle * (1 - e * 0.35) * introA;
       // 贴图尺寸 = 粒子半径 × 视口自适应缩放；环境星与星系粒子分两档粗细。
       // 聚形展示期字形点密度低于星系，非环境星贴图放大 1.35 倍补足单点亮度
       var glyphBoost = !p.ambient && (shapeState >= 0 || shapePhase !== 'none') ? 1.35 : 1;
@@ -775,13 +845,13 @@
       if (pointer.inside) applyPointerGlow(p, x, y, alpha, size);
     }
 
-    // 星系核心辉光（成形时；带缓慢脉动，展示期淡出让位给字形）
+    // 星系核心辉光（成形时；带缓慢脉动，开场尾声点亮，展示期淡出让位给字形）
     if (e < 0.95) {
       var pulse = 1 + 0.06 * Math.sin(t * 1.5);
-      var coreSize = Math.min(width, height) * (0.32 - e * 0.18) * pulse;
-      ctx.globalAlpha = (1 - e) * (1 - showFade);
+      var coreSize = Math.min(width, height) * (0.32 - e * 0.18) * pulse * (0.55 + 0.45 * introCore);
+      ctx.globalAlpha = (1 - e) * (1 - showFade) * introCore;
       ctx.drawImage(sprites.core, galaxyCx - coreSize / 2, galaxyCy - coreSize / 2, coreSize, coreSize);
-      ctx.globalAlpha = (1 - e) * 0.9 * (1 - showFade);
+      ctx.globalAlpha = (1 - e) * 0.9 * (1 - showFade) * introCore;
       var coreSize2 = Math.min(width, height) * 0.07 * pulse;
       ctx.drawImage(sprites.core, galaxyCx - coreSize2 / 2, galaxyCy - coreSize2 / 2, coreSize2, coreSize2);
     }
@@ -942,6 +1012,7 @@
     morph = 0;
     frame(performance.now());
   } else {
+    startIntro(performance.now());
     start();
   }
 })();
